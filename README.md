@@ -1,4 +1,4 @@
-# Codex Widget
+# Codex Reset Widget
 
 A tiny resident Linux utility for monitoring Codex usage and global reset announcements. It stays out of the way in the GNOME status tray, opens as a compact transient card, and surfaces reset notifications without requiring a tracker website to remain open.
 
@@ -51,8 +51,8 @@ On Arch-based distributions, the relevant system packages include `python`, `pyt
 ## Install
 
 ```bash
-git clone https://github.com/1RV1NG-Y/codex-widget.git
-cd codex-widget
+git clone https://github.com/1RV1NG-Y/codex-reset-widget.git
+cd codex-reset-widget
 ./install-user.sh
 ```
 
