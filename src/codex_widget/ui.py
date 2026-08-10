@@ -143,11 +143,11 @@ class WidgetWindow(Gtk.ApplicationWindow):
         self.status.set_line_wrap(True)
         card.pack_start(self.status, False, False, 4)
 
-        self.add_events(
-            Gdk.EventMask.BUTTON_PRESS_MASK | Gdk.EventMask.BUTTON_RELEASE_MASK
-        )
-        self.connect("button-press-event", self._on_drag_start)
-        self.connect("button-release-event", self._on_drag_end)
+        self._drag_gesture = Gtk.GestureMultiPress.new(self)
+        self._drag_gesture.set_button(1)
+        self._drag_gesture.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
+        self._drag_gesture.connect("pressed", self._on_drag_pressed)
+        self._drag_gesture.connect("released", self._on_drag_released)
         self.connect("key-press-event", self._on_key_press)
         self.connect("focus-out-event", self._on_focus_out)
         self.connect("delete-event", self._on_delete)
@@ -196,30 +196,44 @@ class WidgetWindow(Gtk.ApplicationWindow):
             _relative_time(event.announced_at) + " ago" if event is not None else "Unknown"
         )
 
-    def _on_drag_start(self, _window: Gtk.Window, event: Gdk.EventButton) -> bool:
-        event_widget = Gtk.get_event_widget(event)
+    def _on_drag_pressed(
+        self,
+        gesture: Gtk.GestureMultiPress,
+        _press_count: int,
+        _x: float,
+        _y: float,
+    ) -> None:
+        sequence = gesture.get_last_updated_sequence()
+        event = gesture.get_last_event(sequence)
+        event_widget = Gtk.get_event_widget(event) if event is not None else None
         if (
-            event.button != 1
+            event is None
             or event_widget is self.pin_button
             or (
                 event_widget is not None
                 and self.pin_button.is_ancestor(event_widget)
             )
         ):
-            return False
+            gesture.set_state(Gtk.EventSequenceState.DENIED)
+            return
+        gesture.set_state(Gtk.EventSequenceState.CLAIMED)
         self._dragging = True
         self.begin_move_drag(
-            event.button,
+            1,
             int(event.x_root),
             int(event.y_root),
             event.time,
         )
-        return True
 
-    def _on_drag_end(self, _window: Gtk.Window, event: Gdk.EventButton) -> bool:
-        if event.button == 1 and self._dragging:
+    def _on_drag_released(
+        self,
+        _gesture: Gtk.GestureMultiPress,
+        _press_count: int,
+        _x: float,
+        _y: float,
+    ) -> None:
+        if self._dragging:
             GLib.timeout_add(120, self._finish_drag)
-        return False
 
     def _finish_drag(self) -> bool:
         self._dragging = False

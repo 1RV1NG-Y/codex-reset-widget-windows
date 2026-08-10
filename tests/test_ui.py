@@ -4,7 +4,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from gi.repository import Gdk, GLib
+from gi.repository import Gdk, GLib, Gtk
 
 from codex_widget.ui import WidgetWindow
 
@@ -29,6 +29,21 @@ class FakeButton:
 
     def is_ancestor(self, _widget):
         return False
+
+
+class FakeGesture:
+    def __init__(self, event):
+        self.event = event
+        self.state = None
+
+    def get_last_updated_sequence(self):
+        return None
+
+    def get_last_event(self, _sequence):
+        return self.event
+
+    def set_state(self, state):
+        self.state = state
 
 
 class FakeWindow:
@@ -62,28 +77,30 @@ class FakeWindow:
 
 
 class WidgetInteractionTests(unittest.TestCase):
-    def test_primary_button_drags_the_window(self):
+    def test_capture_gesture_drags_from_child_content(self):
         window = FakeWindow()
-        event = SimpleNamespace(button=1, x_root=120.8, y_root=240.2, time=55)
+        event = SimpleNamespace(x_root=120.8, y_root=240.2, time=55)
+        gesture = FakeGesture(event)
 
         with patch("codex_widget.ui.Gtk.get_event_widget", return_value=None):
-            handled = WidgetWindow._on_drag_start(window, None, event)
+            WidgetWindow._on_drag_pressed(window, gesture, 1, 10, 10)
 
-        self.assertTrue(handled)
+        self.assertEqual(gesture.state, Gtk.EventSequenceState.CLAIMED)
         self.assertEqual(window.move, (1, 120, 240, 55))
         self.assertTrue(window._dragging)
 
     def test_pin_button_is_not_a_drag_target(self):
         window = FakeWindow()
-        event = SimpleNamespace(button=1, x_root=120, y_root=240, time=55)
+        event = SimpleNamespace(x_root=120, y_root=240, time=55)
+        gesture = FakeGesture(event)
 
         with patch(
             "codex_widget.ui.Gtk.get_event_widget",
             return_value=window.pin_button,
         ):
-            handled = WidgetWindow._on_drag_start(window, None, event)
+            WidgetWindow._on_drag_pressed(window, gesture, 1, 10, 10)
 
-        self.assertFalse(handled)
+        self.assertEqual(gesture.state, Gtk.EventSequenceState.DENIED)
         self.assertIsNone(window.move)
 
     def test_drag_suppresses_focus_loss_until_release(self):
@@ -92,9 +109,7 @@ class WidgetInteractionTests(unittest.TestCase):
 
         with patch("codex_widget.ui.GLib.timeout_add") as timeout_add:
             WidgetWindow._on_focus_out(window, None, None)
-            WidgetWindow._on_drag_end(
-                window, None, SimpleNamespace(button=1)
-            )
+            WidgetWindow._on_drag_released(window, None, 1, 10, 10)
 
         timeout_add.assert_called_once_with(120, window._finish_drag)
         self.assertEqual(window._finish_drag(), GLib.SOURCE_REMOVE)
