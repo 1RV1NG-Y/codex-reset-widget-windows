@@ -27,6 +27,7 @@ from .watcher import PollOutcome, ResetWatcher, account_reset_observed
 
 _APPLICATION_ID = "io.github.codex_widget.CodexWidget"
 _DEFAULT_POLL_SECONDS = 60
+_USAGE_REFRESH_SECONDS = 60
 
 
 class CodexWidgetApplication(Gtk.Application):
@@ -45,6 +46,8 @@ class CodexWidgetApplication(Gtk.Application):
         self._notification_ids: dict[str, int] = {}
         self._indicator: Any | None = None
         self._tray_menu: Gtk.Menu | None = None
+        self._usage_refresh_source: int | None = None
+        self._usage_refreshing = False
 
     def do_startup(self) -> None:
         Gtk.Application.do_startup(self)
@@ -206,9 +209,40 @@ class CodexWidgetApplication(Gtk.Application):
     def show_widget(self) -> None:
         if self.window is None:
             self.window = WidgetWindow(self)
+            self.window.connect("hide", self._on_widget_hidden)
         state = self.state_store.load()
         self.window.show_loading(state.last_global_reset)
-        self._run_async(self._read_and_store_usage, self._manual_check_finished)
+        self._start_usage_refresh()
+
+    def _start_usage_refresh(self) -> None:
+        if self._usage_refresh_source is None:
+            self._usage_refresh_source = GLib.timeout_add_seconds(
+                _USAGE_REFRESH_SECONDS,
+                self._usage_refresh_tick,
+            )
+        self._refresh_visible_usage()
+
+    def _usage_refresh_tick(self) -> bool:
+        if self.window is None or not self.window.get_visible():
+            self._usage_refresh_source = None
+            return GLib.SOURCE_REMOVE
+        self._refresh_visible_usage()
+        return GLib.SOURCE_CONTINUE
+
+    def _refresh_visible_usage(self) -> None:
+        if (
+            self._usage_refreshing
+            or self.window is None
+            or not self.window.get_visible()
+        ):
+            return
+        self._usage_refreshing = True
+        self._run_async(self._read_and_store_usage, self._usage_refresh_finished)
+
+    def _on_widget_hidden(self, _window: WidgetWindow) -> None:
+        if self._usage_refresh_source is not None:
+            GLib.source_remove(self._usage_refresh_source)
+            self._usage_refresh_source = None
 
     def _read_and_store_usage(self) -> UsageSnapshot:
         usage = self.codex.read_rate_limits()
@@ -218,10 +252,14 @@ class CodexWidgetApplication(Gtk.Application):
             self.state_store.save(state)
         return usage
 
-    def _manual_check_finished(
+    def _usage_refresh_finished(
         self, usage: UsageSnapshot | None, error: BaseException | None
     ) -> None:
-        if self.window is None:
+        self._usage_refreshing = False
+        if (
+            self.window is None
+            or not self.window.get_visible()
+        ):
             return
         state = self.state_store.load()
         if error is not None or usage is None:

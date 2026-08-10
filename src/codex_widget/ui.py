@@ -175,7 +175,7 @@ class WidgetWindow(Gtk.ApplicationWindow):
         )
         self._set_last_reset(last_reset)
         self.status.set_text(
-            f"Updated {_relative_time(usage.checked_at)} ago · click outside to close"
+            f"Updated {_relative_time(usage.checked_at)} ago · auto-refreshes every 60s"
         )
         self.show_all()
         self.present()
