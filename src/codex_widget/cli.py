@@ -1,10 +1,17 @@
 from __future__ import annotations
 
+import os
 import sys
 from collections.abc import Sequence
 
 
+def _prefer_x11_backend() -> None:
+    if os.environ.get("DISPLAY"):
+        os.environ.setdefault("GDK_BACKEND", "x11")
+
+
 def main(argv: Sequence[str] | None = None) -> int:
+    _prefer_x11_backend()
     try:
         from .app import CodexWidgetApplication
     except (ImportError, ValueError) as exc:

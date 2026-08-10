@@ -14,7 +14,7 @@ A tiny resident Linux utility for monitoring Codex usage and global reset announ
 - Shows weekly usage, the next reset, banked resets, and the latest global reset.
 - Distinguishes a global announcement from a reset observed on the local account.
 - Lives in the GNOME AppIndicator tray with Open, Check Now, and Quit actions.
-- Drag the header to move the overlay and use **PIN** to keep it visible.
+- Drag from anywhere except the **PIN** control; pinned mode keeps the widget above other windows.
 - Unpinned widgets hide on focus loss; Escape always dismisses and unpins.
 - Starts automatically through a systemd user service.
 - Stores only minimal local state under the XDG state directory.

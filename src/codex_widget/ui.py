@@ -82,11 +82,12 @@ class WidgetWindow(Gtk.ApplicationWindow):
         self.set_resizable(False)
         self.set_skip_taskbar_hint(True)
         self.set_skip_pager_hint(True)
-        self.set_keep_above(True)
+        self.set_keep_above(False)
         self.set_type_hint(Gdk.WindowTypeHint.UTILITY)
         self.set_position(Gtk.WindowPosition.CENTER)
         self.set_default_size(340, -1)
         self.set_border_width(12)
+        self._dragging = False
 
         screen = self.get_screen()
         visual = screen.get_rgba_visual()
@@ -122,12 +123,7 @@ class WidgetWindow(Gtk.ApplicationWindow):
         header.pack_end(self.pin_button, False, False, 0)
         header.pack_end(hint, False, False, 2)
 
-        drag_area = Gtk.EventBox()
-        drag_area.set_visible_window(False)
-        drag_area.add_events(Gdk.EventMask.BUTTON_PRESS_MASK)
-        drag_area.connect("button-press-event", self._on_drag_start)
-        drag_area.add(header)
-        card.pack_start(drag_area, False, False, 0)
+        card.pack_start(header, False, False, 0)
 
         usage_row, self.usage_value = _row("Weekly used")
         card.pack_start(usage_row, False, False, 3)
@@ -147,6 +143,11 @@ class WidgetWindow(Gtk.ApplicationWindow):
         self.status.set_line_wrap(True)
         card.pack_start(self.status, False, False, 4)
 
+        self.add_events(
+            Gdk.EventMask.BUTTON_PRESS_MASK | Gdk.EventMask.BUTTON_RELEASE_MASK
+        )
+        self.connect("button-press-event", self._on_drag_start)
+        self.connect("button-release-event", self._on_drag_end)
         self.connect("key-press-event", self._on_key_press)
         self.connect("focus-out-event", self._on_focus_out)
         self.connect("delete-event", self._on_delete)
@@ -195,9 +196,18 @@ class WidgetWindow(Gtk.ApplicationWindow):
             _relative_time(event.announced_at) + " ago" if event is not None else "Unknown"
         )
 
-    def _on_drag_start(self, _area: Gtk.EventBox, event: Gdk.EventButton) -> bool:
-        if event.button != 1:
+    def _on_drag_start(self, _window: Gtk.Window, event: Gdk.EventButton) -> bool:
+        event_widget = Gtk.get_event_widget(event)
+        if (
+            event.button != 1
+            or event_widget is self.pin_button
+            or (
+                event_widget is not None
+                and self.pin_button.is_ancestor(event_widget)
+            )
+        ):
             return False
+        self._dragging = True
         self.begin_move_drag(
             event.button,
             int(event.x_root),
@@ -206,13 +216,25 @@ class WidgetWindow(Gtk.ApplicationWindow):
         )
         return True
 
+    def _on_drag_end(self, _window: Gtk.Window, event: Gdk.EventButton) -> bool:
+        if event.button == 1 and self._dragging:
+            GLib.timeout_add(120, self._finish_drag)
+        return False
+
+    def _finish_drag(self) -> bool:
+        self._dragging = False
+        return GLib.SOURCE_REMOVE
+
     def _on_pin_toggled(self, button: Gtk.ToggleButton) -> None:
-        if button.get_active():
+        pinned = button.get_active()
+        self.set_keep_above(pinned)
+        if pinned:
             button.set_label("PINNED")
             button.set_tooltip_text("Unpin to restore click-outside dismissal")
+            self.present()
         else:
             button.set_label("PIN")
-            button.set_tooltip_text("Keep the widget visible when focus changes")
+            button.set_tooltip_text("Keep the widget above other windows")
 
     def _dismiss(self) -> None:
         self.pin_button.set_active(False)
@@ -225,12 +247,16 @@ class WidgetWindow(Gtk.ApplicationWindow):
         return False
 
     def _on_focus_out(self, _window: Gtk.Window, _event: Gdk.EventFocus) -> bool:
-        if not self.pin_button.get_active():
+        if not self.pin_button.get_active() and not self._dragging:
             GLib.timeout_add(120, self._hide_if_inactive)
         return False
 
     def _hide_if_inactive(self) -> bool:
-        if not self.pin_button.get_active() and not self.is_active():
+        if (
+            not self.pin_button.get_active()
+            and not self._dragging
+            and not self.is_active()
+        ):
             self.hide()
         return GLib.SOURCE_REMOVE
 
