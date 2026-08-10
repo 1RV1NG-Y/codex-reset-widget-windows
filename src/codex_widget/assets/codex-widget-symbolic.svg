@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 22 22">
+  <defs>
+    <style type="text/css">
+      .ColorScheme-Text { color: #f2f2f2; }
+    </style>
+  </defs>
+  <g fill="currentColor" class="ColorScheme-Text">
+    <path d="M11 2a9 9 0 1 0 6.72 14.98l-2.08-1.86A6.2 6.2 0 1 1 15.64 6.88l2.08-1.86A8.96 8.96 0 0 0 11 2Z"/>
+    <path d="M11 7.2 14.8 11 11 14.8 7.2 11 11 7.2Zm0 2.35L9.55 11 11 12.45 12.45 11 11 9.55Z" fill-rule="evenodd"/>
+  </g>
+</svg>

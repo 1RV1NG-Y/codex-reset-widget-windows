@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Codex Widget
+Comment=Codex usage and reset status
+Exec=codex-widget
+Icon=codex-widget-symbolic
+Terminal=false
+Categories=Utility;
+Keywords=Codex;OpenAI;Usage;Reset;Widget;
+StartupWMClass=Codex-widget
+StartupNotify=false

@@ -1,0 +1,15 @@
+[Unit]
+Description=Codex reset watcher
+After=graphical-session.target network-online.target
+Wants=network-online.target
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin
+ExecStart=/usr/bin/env codex-widget --daemon
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=default.target

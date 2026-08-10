@@ -1,0 +1,25 @@
+# Private implementation brief
+/codex-widget-project-brief.md
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+build/
+dist/
+.venv/
+venv/
+
+# Local state and environment
+.env
+.env.*
+*.log
+
+# Editors and OS
+.idea/
+.vscode/
+.DS_Store
+*~
