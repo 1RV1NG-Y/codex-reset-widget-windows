@@ -26,6 +26,17 @@ window.codex-widget {
 #label { color: #aeb4bf; font-size: 13px; }
 #value { color: #f4f5f7; font-size: 13px; font-weight: 700; }
 #status { color: #8c93a2; font-size: 12px; }
+#pin {
+  background: #20242d;
+  border: 1px solid #3a404c;
+  border-radius: 7px;
+  color: #aeb4bf;
+  font-size: 10px;
+  font-weight: 700;
+  padding: 2px 7px;
+}
+#pin:hover { border-color: #60a5fa; color: #f4f5f7; }
+#pin:checked { background: #2563eb; border-color: #60a5fa; color: #ffffff; }
 progressbar trough { min-height: 8px; border-radius: 8px; background: #292d36; }
 progressbar progress { min-height: 8px; border-radius: 8px; background: #60a5fa; }
 """
@@ -99,12 +110,24 @@ class WidgetWindow(Gtk.ApplicationWindow):
         dot.set_markup('<span foreground="#60a5fa">●</span>')
         brand = Gtk.Label(label="CODEX", xalign=0)
         brand.set_name("brand")
-        hint = Gtk.Label(label="ESC TO CLOSE", xalign=1)
+        hint = Gtk.Label(label="DRAG TO MOVE", xalign=1)
         hint.set_name("muted")
+        self.pin_button = Gtk.ToggleButton(label="PIN")
+        self.pin_button.set_name("pin")
+        self.pin_button.set_relief(Gtk.ReliefStyle.NONE)
+        self.pin_button.set_tooltip_text("Keep the widget visible when focus changes")
+        self.pin_button.connect("toggled", self._on_pin_toggled)
         header.pack_start(dot, False, False, 0)
         header.pack_start(brand, False, False, 0)
-        header.pack_end(hint, False, False, 0)
-        card.pack_start(header, False, False, 0)
+        header.pack_end(self.pin_button, False, False, 0)
+        header.pack_end(hint, False, False, 2)
+
+        drag_area = Gtk.EventBox()
+        drag_area.set_visible_window(False)
+        drag_area.add_events(Gdk.EventMask.BUTTON_PRESS_MASK)
+        drag_area.connect("button-press-event", self._on_drag_start)
+        drag_area.add(header)
+        card.pack_start(drag_area, False, False, 0)
 
         usage_row, self.usage_value = _row("Weekly used")
         card.pack_start(usage_row, False, False, 3)
@@ -172,21 +195,45 @@ class WidgetWindow(Gtk.ApplicationWindow):
             _relative_time(event.announced_at) + " ago" if event is not None else "Unknown"
         )
 
+    def _on_drag_start(self, _area: Gtk.EventBox, event: Gdk.EventButton) -> bool:
+        if event.button != 1:
+            return False
+        self.begin_move_drag(
+            event.button,
+            int(event.x_root),
+            int(event.y_root),
+            event.time,
+        )
+        return True
+
+    def _on_pin_toggled(self, button: Gtk.ToggleButton) -> None:
+        if button.get_active():
+            button.set_label("PINNED")
+            button.set_tooltip_text("Unpin to restore click-outside dismissal")
+        else:
+            button.set_label("PIN")
+            button.set_tooltip_text("Keep the widget visible when focus changes")
+
+    def _dismiss(self) -> None:
+        self.pin_button.set_active(False)
+        self.hide()
+
     def _on_key_press(self, _window: Gtk.Window, event: Gdk.EventKey) -> bool:
         if event.keyval == Gdk.KEY_Escape:
-            self.hide()
+            self._dismiss()
             return True
         return False
 
     def _on_focus_out(self, _window: Gtk.Window, _event: Gdk.EventFocus) -> bool:
-        GLib.timeout_add(120, self._hide_if_inactive)
+        if not self.pin_button.get_active():
+            GLib.timeout_add(120, self._hide_if_inactive)
         return False
 
     def _hide_if_inactive(self) -> bool:
-        if not self.is_active():
+        if not self.pin_button.get_active() and not self.is_active():
             self.hide()
         return GLib.SOURCE_REMOVE
 
     def _on_delete(self, _window: Gtk.Window, _event: Gdk.Event) -> bool:
-        self.hide()
+        self._dismiss()
         return True
