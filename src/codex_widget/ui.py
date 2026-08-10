@@ -88,6 +88,7 @@ class WidgetWindow(Gtk.ApplicationWindow):
         self.set_default_size(340, -1)
         self.set_border_width(12)
         self._dragging = False
+        self._pointer_origin = (0.0, 0.0)
 
         screen = self.get_screen()
         visual = screen.get_rgba_visual()
@@ -105,49 +106,47 @@ class WidgetWindow(Gtk.ApplicationWindow):
         card.set_name("card")
         card.set_border_width(20)
         self.add(card)
+        self._enable_drag_source(card)
 
         header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        draggable_header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         dot = Gtk.Label(label="●")
         dot.set_markup('<span foreground="#60a5fa">●</span>')
         brand = Gtk.Label(label="CODEX", xalign=0)
         brand.set_name("brand")
-        hint = Gtk.Label(label="DRAG TO MOVE", xalign=1)
+        hint = Gtk.Label(label="DRAG ANYWHERE", xalign=1)
         hint.set_name("muted")
         self.pin_button = Gtk.ToggleButton(label="PIN")
         self.pin_button.set_name("pin")
         self.pin_button.set_relief(Gtk.ReliefStyle.NONE)
         self.pin_button.set_tooltip_text("Keep the widget visible when focus changes")
         self.pin_button.connect("toggled", self._on_pin_toggled)
-        header.pack_start(dot, False, False, 0)
-        header.pack_start(brand, False, False, 0)
+        draggable_header.pack_start(dot, False, False, 0)
+        draggable_header.pack_start(brand, False, False, 0)
+        draggable_header.pack_end(hint, False, False, 2)
+        header.pack_start(self._draggable(draggable_header), True, True, 0)
         header.pack_end(self.pin_button, False, False, 0)
-        header.pack_end(hint, False, False, 2)
 
         card.pack_start(header, False, False, 0)
 
         usage_row, self.usage_value = _row("Weekly used")
-        card.pack_start(usage_row, False, False, 3)
+        card.pack_start(self._draggable(usage_row), False, False, 3)
         self.progress = Gtk.ProgressBar()
         self.progress.set_fraction(0)
-        card.pack_start(self.progress, False, False, 0)
+        card.pack_start(self._draggable(self.progress), False, False, 0)
 
         reset_row, self.reset_value = _row("Resets in")
         banked_row, self.banked_value = _row("Banked resets")
         global_row, self.global_value = _row("🙏 Last Tibo reset")
-        card.pack_start(reset_row, False, False, 3)
-        card.pack_start(banked_row, False, False, 0)
-        card.pack_start(global_row, False, False, 0)
+        card.pack_start(self._draggable(reset_row), False, False, 3)
+        card.pack_start(self._draggable(banked_row), False, False, 0)
+        card.pack_start(self._draggable(global_row), False, False, 0)
 
         self.status = Gtk.Label(label="", xalign=0)
         self.status.set_name("status")
         self.status.set_line_wrap(True)
-        card.pack_start(self.status, False, False, 4)
+        card.pack_start(self._draggable(self.status), False, False, 4)
 
-        self._drag_gesture = Gtk.GestureMultiPress.new(self)
-        self._drag_gesture.set_button(1)
-        self._drag_gesture.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
-        self._drag_gesture.connect("pressed", self._on_drag_pressed)
-        self._drag_gesture.connect("released", self._on_drag_released)
         self.connect("key-press-event", self._on_key_press)
         self.connect("focus-out-event", self._on_focus_out)
         self.connect("delete-event", self._on_delete)
@@ -196,44 +195,56 @@ class WidgetWindow(Gtk.ApplicationWindow):
             _relative_time(event.announced_at) + " ago" if event is not None else "Unknown"
         )
 
-    def _on_drag_pressed(
-        self,
-        gesture: Gtk.GestureMultiPress,
-        _press_count: int,
-        _x: float,
-        _y: float,
-    ) -> None:
-        sequence = gesture.get_last_updated_sequence()
-        event = gesture.get_last_event(sequence)
-        event_widget = Gtk.get_event_widget(event) if event is not None else None
+    def _enable_drag_source(self, widget: Gtk.Widget) -> None:
+        widget.add_events(
+            Gdk.EventMask.BUTTON_PRESS_MASK
+            | Gdk.EventMask.BUTTON_RELEASE_MASK
+            | Gdk.EventMask.POINTER_MOTION_MASK
+        )
+        widget.connect("button-press-event", self._on_drag_press)
+        widget.connect("motion-notify-event", self._on_drag_motion)
+        widget.connect("button-release-event", self._on_drag_release)
+
+    def _draggable(self, child: Gtk.Widget) -> Gtk.EventBox:
+        event_box = Gtk.EventBox()
+        event_box.set_visible_window(False)
+        event_box.set_above_child(True)
+        self._enable_drag_source(event_box)
+        event_box.add(child)
+        return event_box
+
+    def _on_drag_press(self, _widget: Gtk.Widget, event: Gdk.EventButton) -> bool:
+        event_widget = Gtk.get_event_widget(event)
         if (
-            event is None
+            event.button != 1
             or event_widget is self.pin_button
             or (
                 event_widget is not None
                 and self.pin_button.is_ancestor(event_widget)
             )
         ):
-            gesture.set_state(Gtk.EventSequenceState.DENIED)
-            return
-        gesture.set_state(Gtk.EventSequenceState.CLAIMED)
+            return False
+        self._drag_origin = self.get_position()
+        self._pointer_origin = (event.x_root, event.y_root)
         self._dragging = True
-        self.begin_move_drag(
-            1,
-            int(event.x_root),
-            int(event.y_root),
-            event.time,
-        )
+        return True
 
-    def _on_drag_released(
-        self,
-        _gesture: Gtk.GestureMultiPress,
-        _press_count: int,
-        _x: float,
-        _y: float,
-    ) -> None:
-        if self._dragging:
-            GLib.timeout_add(120, self._finish_drag)
+    def _on_drag_motion(self, _widget: Gtk.Widget, event: Gdk.EventMotion) -> bool:
+        if not self._dragging or not (
+            event.state & Gdk.ModifierType.BUTTON1_MASK
+        ):
+            return False
+        self.move(
+            self._drag_origin[0] + int(event.x_root - self._pointer_origin[0]),
+            self._drag_origin[1] + int(event.y_root - self._pointer_origin[1]),
+        )
+        return True
+
+    def _on_drag_release(self, _widget: Gtk.Widget, event: Gdk.EventButton) -> bool:
+        if event.button != 1 or not self._dragging:
+            return False
+        GLib.timeout_add(120, self._finish_drag)
+        return True
 
     def _finish_drag(self) -> bool:
         self._dragging = False

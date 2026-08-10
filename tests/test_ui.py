@@ -4,7 +4,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from gi.repository import Gdk, GLib, Gtk
+from gi.repository import Gdk, GLib
 
 from codex_widget.ui import WidgetWindow
 
@@ -31,20 +31,6 @@ class FakeButton:
         return False
 
 
-class FakeGesture:
-    def __init__(self, event):
-        self.event = event
-        self.state = None
-
-    def get_last_updated_sequence(self):
-        return None
-
-    def get_last_event(self, _sequence):
-        return self.event
-
-    def set_state(self, state):
-        self.state = state
-
 
 class FakeWindow:
     _dismiss = WidgetWindow._dismiss
@@ -55,13 +41,19 @@ class FakeWindow:
         self.pin_button = FakeButton(pinned)
         self.active = active
         self.hidden = False
-        self.move = None
+        self.moved_to = None
+        self.position = (50, 60)
+        self._drag_origin = (0, 0)
+        self._pointer_origin = (0.0, 0.0)
         self._dragging = False
         self.keep_above = False
         self.presented = False
 
-    def begin_move_drag(self, button, x_root, y_root, timestamp):
-        self.move = (button, x_root, y_root, timestamp)
+    def get_position(self):
+        return self.position
+
+    def move(self, x, y):
+        self.moved_to = (x, y)
 
     def hide(self):
         self.hidden = True
@@ -77,31 +69,36 @@ class FakeWindow:
 
 
 class WidgetInteractionTests(unittest.TestCase):
-    def test_capture_gesture_drags_from_child_content(self):
+    def test_event_box_moves_from_child_content(self):
         window = FakeWindow()
-        event = SimpleNamespace(x_root=120.8, y_root=240.2, time=55)
-        gesture = FakeGesture(event)
+        press = SimpleNamespace(button=1, x_root=100.0, y_root=200.0)
+        motion = SimpleNamespace(
+            state=Gdk.ModifierType.BUTTON1_MASK,
+            x_root=130.8,
+            y_root=240.2,
+        )
 
         with patch("codex_widget.ui.Gtk.get_event_widget", return_value=None):
-            WidgetWindow._on_drag_pressed(window, gesture, 1, 10, 10)
+            pressed = WidgetWindow._on_drag_press(window, None, press)
+            moved = WidgetWindow._on_drag_motion(window, None, motion)
 
-        self.assertEqual(gesture.state, Gtk.EventSequenceState.CLAIMED)
-        self.assertEqual(window.move, (1, 120, 240, 55))
+        self.assertTrue(pressed)
+        self.assertTrue(moved)
+        self.assertEqual(window.moved_to, (80, 100))
         self.assertTrue(window._dragging)
 
     def test_pin_button_is_not_a_drag_target(self):
         window = FakeWindow()
-        event = SimpleNamespace(x_root=120, y_root=240, time=55)
-        gesture = FakeGesture(event)
+        event = SimpleNamespace(button=1, x_root=100, y_root=200)
 
         with patch(
             "codex_widget.ui.Gtk.get_event_widget",
             return_value=window.pin_button,
         ):
-            WidgetWindow._on_drag_pressed(window, gesture, 1, 10, 10)
+            handled = WidgetWindow._on_drag_press(window, None, event)
 
-        self.assertEqual(gesture.state, Gtk.EventSequenceState.DENIED)
-        self.assertIsNone(window.move)
+        self.assertFalse(handled)
+        self.assertIsNone(window.moved_to)
 
     def test_drag_suppresses_focus_loss_until_release(self):
         window = FakeWindow()
@@ -109,8 +106,11 @@ class WidgetInteractionTests(unittest.TestCase):
 
         with patch("codex_widget.ui.GLib.timeout_add") as timeout_add:
             WidgetWindow._on_focus_out(window, None, None)
-            WidgetWindow._on_drag_released(window, None, 1, 10, 10)
+            handled = WidgetWindow._on_drag_release(
+                window, None, SimpleNamespace(button=1)
+            )
 
+        self.assertTrue(handled)
         timeout_add.assert_called_once_with(120, window._finish_drag)
         self.assertEqual(window._finish_drag(), GLib.SOURCE_REMOVE)
         self.assertFalse(window._dragging)
