@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import unittest
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from gi.repository import Gdk, GLib
 
 from codex_widget.ui import WidgetWindow
+from codex_widget.models import ResetEvent
 
 
 class FakeButton:
@@ -86,6 +87,25 @@ class WidgetInteractionTests(unittest.TestCase):
         self.assertTrue(moved)
         self.assertEqual(window.moved_to, (80, 100))
         self.assertTrue(window._dragging)
+
+    def test_last_reset_prefers_observed_effective_time(self):
+        announced_at = object()
+        effective_at = object()
+        event = ResetEvent(
+            "pending",
+            announced_at,
+            "Reset planned for Monday",
+            "https://example.test/pending",
+            effective_at=effective_at,
+        )
+        label = Mock()
+        window = SimpleNamespace(global_value=label)
+
+        with patch("codex_widget.ui._relative_time", return_value="3m") as relative:
+            WidgetWindow._set_last_reset(window, event)
+
+        relative.assert_called_once_with(effective_at)
+        label.set_text.assert_called_once_with("3m ago")
 
     def test_pin_button_is_not_a_drag_target(self):
         window = FakeWindow()

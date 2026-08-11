@@ -12,7 +12,7 @@ A tiny resident Linux utility for monitoring Codex usage and global reset announ
 - Detects confirmed Tibo reset announcements without duplicate notifications.
 - Refreshes real account usage every 60 seconds while the widget is visible.
 - Shows weekly usage, the next reset, banked resets, and the latest global reset.
-- Distinguishes a global announcement from a reset observed on the local account.
+- Correlates an active Tibo reset signal with a fresh low-usage account observation when the tracker has not confirmed it yet.
 - Lives in the GNOME AppIndicator tray with Open, Check Now, and Quit actions.
 - Drag from anywhere except the **PIN** control; pinned mode keeps the widget above other windows.
 - Unpinned widgets hide on focus loss; Escape always dismisses and unpins.

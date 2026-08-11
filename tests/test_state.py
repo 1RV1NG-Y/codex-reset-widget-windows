@@ -21,6 +21,7 @@ class StateStoreTests(unittest.TestCase):
                     announced_at=datetime(2026, 8, 10, 8, tzinfo=UTC),
                     summary="Reset announced",
                     url="https://example.test/tweet-42",
+                    effective_at=datetime(2026, 8, 10, 9, tzinfo=UTC),
                 ),
                 last_known_usage=UsageSnapshot(
                     used_percent=38,

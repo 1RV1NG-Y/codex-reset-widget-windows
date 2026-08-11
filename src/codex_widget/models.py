@@ -14,6 +14,8 @@ class ResetEvent:
     announced_at: datetime
     summary: str
     url: str
+    effective_at: datetime | None = None
+    confirmed: bool = True
 
 
 @dataclass(frozen=True, slots=True)

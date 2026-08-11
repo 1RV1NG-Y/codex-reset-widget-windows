@@ -59,6 +59,7 @@ class StateStore:
                     announced_at=announced_at,
                     summary=str(reset_data.get("summary") or ""),
                     url=str(reset_data.get("url") or ""),
+                    effective_at=_parse_time(reset_data.get("effective_at")),
                 )
 
         usage: UsageSnapshot | None = None
@@ -106,6 +107,7 @@ class StateStore:
             document["last_global_reset"] = {
                 "id": event.event_id,
                 "announced_at": _format_time(event.announced_at),
+                "effective_at": _format_time(event.effective_at),
                 "summary": event.summary,
                 "url": event.url,
             }

@@ -191,8 +191,11 @@ class WidgetWindow(Gtk.ApplicationWindow):
         self.present()
 
     def _set_last_reset(self, event: ResetEvent | None) -> None:
+        occurred_at = (
+            event.effective_at or event.announced_at if event is not None else None
+        )
         self.global_value.set_text(
-            _relative_time(event.announced_at) + " ago" if event is not None else "Unknown"
+            _relative_time(occurred_at) + " ago" if occurred_at is not None else "Unknown"
         )
 
     def _enable_drag_source(self, widget: Gtk.Widget) -> None:

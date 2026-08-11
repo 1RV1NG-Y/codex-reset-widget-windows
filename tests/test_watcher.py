@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from unittest.mock import patch
 from datetime import UTC, datetime
 from pathlib import Path
 
-from codex_widget.models import ResetEvent, UsageSnapshot
+from codex_widget.models import AppState, ResetEvent, UsageSnapshot
 from codex_widget.state import StateStore
 from codex_widget.watcher import PollOutcome, ResetWatcher, account_reset_observed
 
@@ -14,7 +15,7 @@ class FakeTracker:
     def __init__(self, event):
         self.event = event
 
-    def fetch_latest_confirmed(self):
+    def fetch_latest_relevant(self):
         return self.event
 
 
@@ -49,6 +50,43 @@ class ResetWatcherTests(unittest.TestCase):
             self.assertIs(changed, PollOutcome.NEW_RESET)
             self.assertEqual(latest.event_id, "two")
             self.assertEqual(state.last_seen_reset_id, "two")
+
+    def test_active_tibo_signal_is_confirmed_by_fresh_low_usage(self):
+        now = datetime(2026, 8, 11, 0, 16, tzinfo=UTC)
+        with tempfile.TemporaryDirectory() as directory:
+            store = StateStore(Path(directory) / "state.json")
+            store.save(
+                AppState(
+                    last_seen_reset_id="old",
+                    last_global_reset=event("old"),
+                    last_known_usage=UsageSnapshot(
+                        4,
+                        datetime(2026, 8, 18, 0, 16, tzinfo=UTC),
+                        10080,
+                        0,
+                        checked_at=now,
+                    ),
+                )
+            )
+            pending = ResetEvent(
+                event_id="pending",
+                announced_at=datetime(2026, 8, 8, 20, tzinfo=UTC),
+                summary="Reset planned for Monday",
+                url="https://example.test/pending",
+                confirmed=False,
+            )
+            watcher = ResetWatcher(FakeTracker(pending), store)
+            with patch(
+                "codex_widget.watcher.utc_now",
+                return_value=now,
+            ):
+                outcome, latest, state = watcher.poll_once()
+
+        self.assertIs(outcome, PollOutcome.NEW_RESET)
+        self.assertTrue(latest.confirmed)
+        self.assertEqual(latest.effective_at, now)
+        self.assertEqual(state.last_seen_reset_id, "pending")
+        self.assertEqual(state.last_global_reset, latest)
 
     def test_account_reset_requires_low_or_decreased_usage(self):
         self.assertTrue(account_reset_observed(None, usage(0)))
