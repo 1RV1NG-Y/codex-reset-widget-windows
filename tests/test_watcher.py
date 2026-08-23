@@ -19,10 +19,10 @@ class FakeTracker:
         return self.event
 
 
-def event(event_id: str) -> ResetEvent:
+def event(event_id: str, announced_at: datetime | None = None) -> ResetEvent:
     return ResetEvent(
         event_id=event_id,
-        announced_at=datetime(2026, 8, 10, tzinfo=UTC),
+        announced_at=announced_at or datetime(2026, 8, 8, 20, 29, tzinfo=UTC),
         summary="Reset",
         url="https://example.test/reset",
     )
@@ -42,7 +42,7 @@ class ResetWatcherTests(unittest.TestCase):
 
             first, _, _ = watcher.poll_once()
             duplicate, _, _ = watcher.poll_once()
-            tracker.event = event("two")
+            tracker.event = event("two", datetime(2026, 8, 11, tzinfo=UTC))
             changed, latest, state = watcher.poll_once()
 
             self.assertIs(first, PollOutcome.SEEDED)
@@ -70,7 +70,7 @@ class ResetWatcherTests(unittest.TestCase):
             )
             pending = ResetEvent(
                 event_id="pending",
-                announced_at=datetime(2026, 8, 8, 20, tzinfo=UTC),
+                announced_at=datetime(2026, 8, 8, 20, 34, tzinfo=UTC),
                 summary="Reset planned for Monday",
                 url="https://example.test/pending",
                 confirmed=False,
@@ -86,6 +86,26 @@ class ResetWatcherTests(unittest.TestCase):
         self.assertTrue(latest.confirmed)
         self.assertEqual(latest.effective_at, now)
         self.assertEqual(state.last_seen_reset_id, "pending")
+        self.assertEqual(state.last_global_reset, latest)
+
+    def test_older_source_result_never_replaces_newer_state(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = StateStore(Path(directory) / "state.json")
+            latest = event("latest", datetime(2026, 8, 13, tzinfo=UTC))
+            store.save(
+                AppState(
+                    last_seen_reset_id=latest.event_id,
+                    last_global_reset=latest,
+                )
+            )
+            watcher = ResetWatcher(
+                FakeTracker(event("regressed", datetime(2026, 8, 11, tzinfo=UTC))),
+                store,
+            )
+
+            outcome, _, state = watcher.poll_once()
+
+        self.assertIs(outcome, PollOutcome.UNCHANGED)
         self.assertEqual(state.last_global_reset, latest)
 
     def test_account_reset_requires_low_or_decreased_usage(self):

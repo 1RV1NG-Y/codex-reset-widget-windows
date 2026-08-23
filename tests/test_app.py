@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from datetime import UTC, datetime
 from unittest.mock import patch
 from types import SimpleNamespace
 
@@ -8,6 +9,7 @@ from gi.repository import GLib
 
 from codex_widget.app import CodexWidgetApplication
 from codex_widget.models import ResetEvent, utc_now
+from codex_widget.watcher import PollOutcome
 
 
 class FakeApplication:
@@ -101,6 +103,35 @@ class ResetDemoTests(unittest.TestCase):
         self.assertEqual(first_arguments[-2], "🔥 Codex reset announced")
         self.assertEqual(final_arguments[-2], "🔥 Codex reset")
         self.assertEqual(application._notification_ids, {})
+
+class PollCompletionTests(unittest.TestCase):
+    def test_historical_catch_up_updates_without_notification(self):
+        application = SimpleNamespace(
+            _polling=True,
+            window=None,
+            _send_reset_notification=lambda *_args, **_kwargs: self.fail(
+                "historical reset should not notify"
+            ),
+        )
+        event = ResetEvent(
+            "catch-up",
+            datetime(2026, 8, 11, tzinfo=UTC),
+            "Reset",
+            "",
+        )
+
+        with patch(
+            "codex_widget.app.utc_now",
+            return_value=datetime(2026, 8, 23, tzinfo=UTC),
+        ):
+            CodexWidgetApplication._poll_finished(
+                application,
+                (PollOutcome.NEW_RESET, event, None),
+                None,
+            )
+
+        self.assertFalse(application._polling)
+
 
 class UsageRefreshTests(unittest.TestCase):
     def test_visible_widget_refreshes_immediately_without_overlap(self):

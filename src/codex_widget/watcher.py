@@ -33,6 +33,11 @@ class ResetWatcher:
                 effective_at=usage.checked_at,
                 confirmed=True,
             )
+        if (
+            state.last_global_reset is not None
+            and event.announced_at <= state.last_global_reset.announced_at
+        ):
+            return PollOutcome.UNCHANGED, event, state
         if state.last_seen_reset_id == event.event_id:
             return PollOutcome.UNCHANGED, event, state
 

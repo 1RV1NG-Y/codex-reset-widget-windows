@@ -4,6 +4,7 @@ import os
 import subprocess
 import threading
 from collections.abc import Callable
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
@@ -28,6 +29,7 @@ from .watcher import PollOutcome, ResetWatcher, account_reset_observed
 _APPLICATION_ID = "io.github.codex_widget.CodexWidget"
 _DEFAULT_POLL_SECONDS = 60
 _USAGE_REFRESH_SECONDS = 60
+_RESET_NOTIFICATION_MAX_AGE = timedelta(hours=6)
 
 
 class CodexWidgetApplication(Gtk.Application):
@@ -193,6 +195,14 @@ class CodexWidgetApplication(Gtk.Application):
             return
         outcome, event, previous_usage = result
         if outcome is not PollOutcome.NEW_RESET:
+            return
+        if event.announced_at < utc_now() - _RESET_NOTIFICATION_MAX_AGE:
+            if (
+                self.window is not None
+                and self.window.get_visible()
+                and previous_usage is not None
+            ):
+                self.window.show_usage(previous_usage, event)
             return
         self._send_reset_notification(
             event,

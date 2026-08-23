@@ -8,8 +8,8 @@ A tiny resident Linux utility for monitoring Codex usage and global reset announ
 
 ## Features
 
-- Polls a lightweight public reset feed once per minute.
-- Detects confirmed Tibo reset announcements without duplicate notifications.
+- Polls the verified reset feed once per minute and fails over to a separate tracker service when the primary is unavailable or malformed.
+- Accepts verified archive records when the live feed changes shape, deduplicates events, and never replaces a newer saved reset with older source data.
 - Refreshes real account usage every 60 seconds while the widget is visible.
 - Shows weekly usage, the next reset, banked resets, and the latest global reset.
 - Correlates an active Tibo reset signal with a fresh low-usage account observation when the tracker has not confirmed it yet.
@@ -104,7 +104,7 @@ The global event source and the personal account source intentionally remain sep
 
 ## Resource usage
 
-At idle, the resident GTK/Python process measured approximately 67 MB RSS and 0.0% CPU on the development system. Network activity is one small reset-feed request per minute. Codex account queries run when the widget opens, once per minute while it remains visible, and once after a new reset event; they stop immediately when the widget hides.
+At idle, the resident GTK/Python process measured approximately 67 MB RSS and 0.0% CPU on the development system. Network activity is one small primary reset-feed request per minute, plus one fallback request only when the primary fails. Codex account queries run when the widget opens, once per minute while it remains visible, and once after a new reset event; they stop immediately when the widget hides.
 
 ## Development
 
