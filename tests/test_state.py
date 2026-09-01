@@ -32,6 +32,9 @@ class StateStoreTests(unittest.TestCase):
                         datetime(2026, 8, 20, 8, tzinfo=UTC),
                     ),
                     checked_at=datetime(2026, 8, 10, 9, tzinfo=UTC),
+                    five_hour_used_percent=12,
+                    five_hour_reset_at=datetime(2026, 8, 10, 12, tzinfo=UTC),
+                    five_hour_window_minutes=300,
                 ),
             )
 

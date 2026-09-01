@@ -71,6 +71,13 @@ class StateStore:
                 if isinstance(used, (int, float)) and not isinstance(used, bool)
                 else None
             )
+            five_hour_used = usage_data.get("five_hour_used_percent")
+            five_hour_used_percent = (
+                float(five_hour_used)
+                if isinstance(five_hour_used, (int, float))
+                and not isinstance(five_hour_used, bool)
+                else None
+            )
             window = usage_data.get("window_minutes")
             banked = usage_data.get("banked_resets")
             expirations_data = usage_data.get("banked_reset_expirations")
@@ -85,6 +92,15 @@ class StateStore:
                 window_minutes=window if isinstance(window, int) else None,
                 banked_resets=banked if isinstance(banked, int) else None,
                 banked_reset_expirations=expirations,
+                five_hour_used_percent=five_hour_used_percent,
+                five_hour_reset_at=_parse_time(
+                    usage_data.get("five_hour_reset_at")
+                ),
+                five_hour_window_minutes=(
+                    usage_data.get("five_hour_window_minutes")
+                    if isinstance(usage_data.get("five_hour_window_minutes"), int)
+                    else None
+                ),
                 checked_at=_parse_time(usage_data.get("checked_at")) or datetime.now(UTC),
             )
 
@@ -117,6 +133,9 @@ class StateStore:
                 "used_percent": usage.used_percent,
                 "reset_at": _format_time(usage.reset_at),
                 "window_minutes": usage.window_minutes,
+                "five_hour_used_percent": usage.five_hour_used_percent,
+                "five_hour_reset_at": _format_time(usage.five_hour_reset_at),
+                "five_hour_window_minutes": usage.five_hour_window_minutes,
                 "banked_resets": usage.banked_resets,
                 "banked_reset_expirations": [
                     _format_time(value) for value in usage.banked_reset_expirations

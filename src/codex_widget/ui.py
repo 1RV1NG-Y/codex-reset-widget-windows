@@ -129,13 +129,27 @@ class WidgetWindow(Gtk.ApplicationWindow):
 
         card.pack_start(header, False, False, 0)
 
+        five_hour_row, self.five_hour_value = _row("5-hour used")
+        card.pack_start(self._draggable(five_hour_row), False, False, 3)
+        self.five_hour_progress = Gtk.ProgressBar()
+        self.five_hour_progress.set_fraction(0)
+        card.pack_start(self._draggable(self.five_hour_progress), False, False, 0)
+        five_hour_reset_row, self.five_hour_reset_value = _row(
+            "5-hour resets in"
+        )
+        card.pack_start(
+            self._draggable(five_hour_reset_row),
+            False,
+            False,
+            3,
+        )
         usage_row, self.usage_value = _row("Weekly used")
         card.pack_start(self._draggable(usage_row), False, False, 3)
         self.progress = Gtk.ProgressBar()
         self.progress.set_fraction(0)
         card.pack_start(self._draggable(self.progress), False, False, 0)
 
-        reset_row, self.reset_value = _row("Resets in")
+        reset_row, self.reset_value = _row("Weekly resets in")
         banked_row, self.banked_value = _row("Banked resets")
         global_row, self.global_value = _row("🙏 Last Tibo reset")
         card.pack_start(self._draggable(reset_row), False, False, 3)
@@ -153,6 +167,9 @@ class WidgetWindow(Gtk.ApplicationWindow):
 
     def show_loading(self, last_reset: ResetEvent | None) -> None:
         self.usage_value.set_text("Checking…")
+        self.five_hour_value.set_text("Checking…")
+        self.five_hour_progress.set_fraction(0)
+        self.five_hour_reset_value.set_text("—")
         self.reset_value.set_text("—")
         self.banked_value.set_text("—")
         self._set_last_reset(last_reset)
@@ -163,6 +180,17 @@ class WidgetWindow(Gtk.ApplicationWindow):
     def show_usage(
         self, usage: UsageSnapshot, last_reset: ResetEvent | None
     ) -> None:
+        if usage.five_hour_used_percent is None:
+            self.five_hour_value.set_text("Unavailable")
+            self.five_hour_progress.set_fraction(0)
+        else:
+            self.five_hour_value.set_text(f"{usage.five_hour_used_percent:.0f}%")
+            self.five_hour_progress.set_fraction(
+                max(0.0, min(1.0, usage.five_hour_used_percent / 100))
+            )
+        self.five_hour_reset_value.set_text(
+            _relative_time(usage.five_hour_reset_at, future=True)
+        )
         if usage.used_percent is None:
             self.usage_value.set_text("Unavailable")
             self.progress.set_fraction(0)
@@ -182,6 +210,9 @@ class WidgetWindow(Gtk.ApplicationWindow):
 
     def show_error(self, message: str, last_reset: ResetEvent | None) -> None:
         self.usage_value.set_text("Unavailable")
+        self.five_hour_value.set_text("Unavailable")
+        self.five_hour_progress.set_fraction(0)
+        self.five_hour_reset_value.set_text("—")
         self.progress.set_fraction(0)
         self.reset_value.set_text("—")
         self.banked_value.set_text("—")

@@ -26,6 +26,9 @@ class UsageSnapshot:
     banked_resets: int | None
     banked_reset_expirations: tuple[datetime, ...] = ()
     checked_at: datetime = field(default_factory=utc_now)
+    five_hour_used_percent: float | None = None
+    five_hour_reset_at: datetime | None = None
+    five_hour_window_minutes: int | None = None
 
 
 @dataclass(slots=True)

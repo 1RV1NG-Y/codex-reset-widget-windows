@@ -43,6 +43,12 @@ class CodexClientTests(unittest.TestCase):
         self.assertEqual(
             snapshot.reset_at, datetime.fromtimestamp(1_786_868_740, UTC)
         )
+        self.assertEqual(snapshot.five_hour_used_percent, 10)
+        self.assertEqual(snapshot.five_hour_window_minutes, 300)
+        self.assertEqual(
+            snapshot.five_hour_reset_at,
+            datetime.fromtimestamp(1_786_100_000, UTC),
+        )
         self.assertEqual(snapshot.banked_resets, 2)
         self.assertEqual(
             snapshot.banked_reset_expirations,

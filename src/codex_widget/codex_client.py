@@ -147,6 +147,14 @@ class CodexClient:
             ),
             windows[0] if windows else {},
         )
+        five_hour = next(
+            (
+                candidate
+                for candidate in windows
+                if candidate.get("windowDurationMins") == 5 * 60
+            ),
+            {},
+        )
         window = weekly.get("windowDurationMins")
         window_minutes = (
             int(window)
@@ -178,4 +186,11 @@ class CodexClient:
             window_minutes=window_minutes,
             banked_resets=banked_resets,
             banked_reset_expirations=tuple(sorted(expirations)),
+            five_hour_used_percent=_number(five_hour.get("usedPercent")),
+            five_hour_reset_at=_epoch_timestamp(five_hour.get("resetsAt")),
+            five_hour_window_minutes=(
+                300
+                if five_hour.get("windowDurationMins") == 300
+                else None
+            ),
         )
