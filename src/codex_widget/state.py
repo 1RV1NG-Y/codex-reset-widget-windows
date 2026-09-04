@@ -109,6 +109,9 @@ class StateStore:
             last_seen_reset_id=last_seen if isinstance(last_seen, str) else None,
             last_global_reset=reset,
             last_known_usage=usage,
+            keep_five_hour_window_active=(
+                document.get("keep_five_hour_window_active") is True
+            ),
         )
 
     def save(self, state: AppState) -> None:
@@ -117,6 +120,7 @@ class StateStore:
             "last_seen_reset_id": state.last_seen_reset_id,
             "last_global_reset": None,
             "last_known_usage": None,
+            "keep_five_hour_window_active": state.keep_five_hour_window_active,
         }
         if state.last_global_reset is not None:
             event = state.last_global_reset

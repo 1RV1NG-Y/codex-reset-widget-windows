@@ -4,7 +4,8 @@ import os
 import subprocess
 import threading
 from collections.abc import Callable
-from datetime import timedelta
+from datetime import datetime, timedelta
+import math
 from pathlib import Path
 from typing import Any
 
@@ -30,6 +31,9 @@ _APPLICATION_ID = "io.github.codex_widget.CodexWidget"
 _DEFAULT_POLL_SECONDS = 60
 _USAGE_REFRESH_SECONDS = 60
 _RESET_NOTIFICATION_MAX_AGE = timedelta(hours=6)
+_WINDOW_KEEPER_GRACE_SECONDS = 10
+_WINDOW_KEEPER_RETRY_SECONDS = 5 * 60
+_WINDOW_KEEPER_PROPAGATION_SECONDS = 60
 
 
 class CodexWidgetApplication(Gtk.Application):
@@ -45,11 +49,15 @@ class CodexWidgetApplication(Gtk.Application):
         self._resident = False
         self._polling = False
         self._state_lock = threading.Lock()
+        self._account_query_lock = threading.Lock()
         self._notification_ids: dict[str, int] = {}
         self._indicator: Any | None = None
         self._tray_menu: Gtk.Menu | None = None
         self._usage_refresh_source: int | None = None
         self._usage_refreshing = False
+        self._window_keeper_source: int | None = None
+        self._window_keeper_busy = False
+        self._window_keeper_message = "Automatic 5-hour rolling is off"
 
     def do_startup(self) -> None:
         Gtk.Application.do_startup(self)
@@ -161,6 +169,8 @@ class CodexWidgetApplication(Gtk.Application):
         interval = self._poll_interval()
         GLib.timeout_add_seconds(interval, self._poll_tick)
         self._poll_tick()
+        if self.state_store.load().keep_five_hour_window_active:
+            self._refresh_window_keeper_schedule()
 
     @staticmethod
     def _poll_interval() -> int:
@@ -221,6 +231,10 @@ class CodexWidgetApplication(Gtk.Application):
             self.window = WidgetWindow(self)
             self.window.connect("hide", self._on_widget_hidden)
         state = self.state_store.load()
+        self.window.set_window_keeper_state(
+            state.keep_five_hour_window_active,
+            self._window_keeper_message,
+        )
         self.window.show_loading(state.last_global_reset)
         self._start_usage_refresh()
 
@@ -255,12 +269,175 @@ class CodexWidgetApplication(Gtk.Application):
             self._usage_refresh_source = None
 
     def _read_and_store_usage(self) -> UsageSnapshot:
+        with self._account_query_lock:
+            return self._read_and_store_usage_unlocked()
+
+    def _read_and_store_usage_unlocked(self) -> UsageSnapshot:
         usage = self.codex.read_rate_limits()
         with self._state_lock:
             state = self.state_store.load()
             state.last_known_usage = usage
             self.state_store.save(state)
         return usage
+
+    def set_window_keeper_enabled(self, enabled: bool) -> None:
+        with self._state_lock:
+            state = self.state_store.load()
+            state.keep_five_hour_window_active = enabled
+            self.state_store.save(state)
+        if enabled:
+            self._set_window_keeper_message("Checking the 5-hour window…")
+            self._refresh_window_keeper_schedule()
+        else:
+            self._cancel_window_keeper_timer()
+            self._set_window_keeper_message("Automatic 5-hour rolling is off")
+
+    def _window_keeper_enabled(self) -> bool:
+        with self._state_lock:
+            return self.state_store.load().keep_five_hour_window_active
+
+    def _refresh_window_keeper_schedule(self) -> None:
+        if self._window_keeper_busy or not self._window_keeper_enabled():
+            return
+        self._window_keeper_busy = True
+        self._run_async(
+            self._read_and_store_usage,
+            self._window_keeper_schedule_refreshed,
+        )
+
+    def _window_keeper_schedule_refreshed(
+        self,
+        usage: UsageSnapshot | None,
+        error: BaseException | None,
+    ) -> None:
+        self._window_keeper_busy = False
+        if not self._window_keeper_enabled():
+            return
+        if error is not None or usage is None:
+            detail = str(error) if error is not None else "usage unavailable"
+            self._schedule_window_keeper_retry(
+                _WINDOW_KEEPER_RETRY_SECONDS,
+                f"5-hour auto-roll unavailable; retrying in 5m: {detail}",
+            )
+            return
+        self._schedule_window_keeper_from_usage(usage)
+
+    def _schedule_window_keeper_from_usage(self, usage: UsageSnapshot) -> None:
+        if not self._window_keeper_enabled():
+            return
+        now = utc_now()
+        if (
+            usage.used_percent is not None
+            and usage.used_percent >= 100
+            and usage.reset_at is not None
+            and usage.reset_at > now
+        ):
+            target = usage.reset_at + timedelta(
+                seconds=_WINDOW_KEEPER_GRACE_SECONDS
+            )
+            self._schedule_window_keeper_at(
+                target,
+                "5-hour auto-roll paused at the weekly limit; "
+                f"resumes {target.astimezone():%a %H:%M}",
+            )
+            return
+        if usage.five_hour_reset_at is not None and usage.five_hour_reset_at > now:
+            target = usage.five_hour_reset_at + timedelta(
+                seconds=_WINDOW_KEEPER_GRACE_SECONDS
+            )
+            self._schedule_window_keeper_at(
+                target,
+                f"5-hour auto-roll on · next tiny request {target.astimezone():%a %H:%M}",
+            )
+            return
+        self._schedule_window_keeper_at(
+            now + timedelta(seconds=1),
+            "5-hour auto-roll on · activating an idle window",
+        )
+
+    def _schedule_window_keeper_at(
+        self, target: datetime, message: str
+    ) -> None:
+        self._cancel_window_keeper_timer()
+        seconds = max(1, math.ceil((target - utc_now()).total_seconds()))
+        self._window_keeper_source = GLib.timeout_add_seconds(
+            seconds,
+            self._window_keeper_timer_fired,
+        )
+        self._set_window_keeper_message(message)
+
+    def _schedule_window_keeper_retry(self, seconds: int, message: str) -> None:
+        self._cancel_window_keeper_timer()
+        self._window_keeper_source = GLib.timeout_add_seconds(
+            seconds,
+            self._window_keeper_retry_fired,
+        )
+        self._set_window_keeper_message(message)
+
+    def _cancel_window_keeper_timer(self) -> None:
+        if self._window_keeper_source is not None:
+            GLib.source_remove(self._window_keeper_source)
+            self._window_keeper_source = None
+
+    def _window_keeper_timer_fired(self) -> bool:
+        self._window_keeper_source = None
+        if not self._window_keeper_enabled() or self._window_keeper_busy:
+            return GLib.SOURCE_REMOVE
+        self._window_keeper_busy = True
+        self._set_window_keeper_message("Sending the tiny 5-hour activation request…")
+        self._run_async(
+            self._activate_and_read_usage,
+            self._window_keeper_activation_finished,
+        )
+        return GLib.SOURCE_REMOVE
+
+    def _window_keeper_retry_fired(self) -> bool:
+        self._window_keeper_source = None
+        self._refresh_window_keeper_schedule()
+        return GLib.SOURCE_REMOVE
+
+    def _activate_and_read_usage(self) -> UsageSnapshot:
+        with self._account_query_lock:
+            self.codex.activate_five_hour_window()
+            return self._read_and_store_usage_unlocked()
+
+    def _window_keeper_activation_finished(
+        self,
+        usage: UsageSnapshot | None,
+        error: BaseException | None,
+    ) -> None:
+        self._window_keeper_busy = False
+        if not self._window_keeper_enabled():
+            return
+        if error is not None or usage is None:
+            detail = str(error) if error is not None else "usage unavailable"
+            self._schedule_window_keeper_retry(
+                _WINDOW_KEEPER_RETRY_SECONDS,
+                f"5-hour activation failed; retrying in 5m: {detail}",
+            )
+            return
+        if (
+            usage.five_hour_reset_at is None
+            or usage.five_hour_reset_at
+            <= utc_now() + timedelta(seconds=_WINDOW_KEEPER_GRACE_SECONDS)
+        ):
+            self._schedule_window_keeper_retry(
+                _WINDOW_KEEPER_PROPAGATION_SECONDS,
+                "Activation sent; waiting for the new 5-hour window",
+            )
+            return
+        self._schedule_window_keeper_from_usage(usage)
+        if self.window is not None and self.window.get_visible():
+            state = self.state_store.load()
+            self.window.show_usage(usage, state.last_global_reset)
+
+    def _set_window_keeper_message(self, message: str) -> None:
+        self._window_keeper_message = message
+        if self.window is not None:
+            self.window.set_window_keeper_state(
+                self._window_keeper_enabled(),
+                message,
+            )
 
     def _usage_refresh_finished(
         self, usage: UsageSnapshot | None, error: BaseException | None
@@ -277,6 +454,8 @@ class CodexWidgetApplication(Gtk.Application):
             self.window.show_error(message, state.last_global_reset)
             return
         self.window.show_usage(usage, state.last_global_reset)
+        if self._window_keeper_enabled() and not self._window_keeper_busy:
+            self._schedule_window_keeper_from_usage(usage)
 
     def _reset_account_check_finished(
         self,

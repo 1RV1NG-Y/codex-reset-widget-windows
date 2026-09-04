@@ -37,6 +37,18 @@ window.codex-widget {
 }
 #pin:hover { border-color: #60a5fa; color: #f4f5f7; }
 #pin:checked { background: #2563eb; border-color: #60a5fa; color: #ffffff; }
+#keeper {
+  background: #20242d;
+  border: 1px solid #3a404c;
+  border-radius: 8px;
+  color: #aeb4bf;
+  font-size: 11px;
+  font-weight: 700;
+  padding: 7px 10px;
+}
+#keeper:hover { border-color: #60a5fa; color: #f4f5f7; }
+#keeper:checked { background: #163a66; border-color: #60a5fa; color: #ffffff; }
+#keeper-status { color: #8c93a2; font-size: 11px; }
 progressbar trough { min-height: 8px; border-radius: 8px; background: #292d36; }
 progressbar progress { min-height: 8px; border-radius: 8px; background: #60a5fa; }
 """
@@ -90,6 +102,7 @@ class WidgetWindow(Gtk.ApplicationWindow):
         self._dragging = False
         self._pointer_origin = (0.0, 0.0)
 
+        self._keeper_syncing = False
         screen = self.get_screen()
         visual = screen.get_rgba_visual()
         if visual is not None and screen.is_composited():
@@ -156,6 +169,23 @@ class WidgetWindow(Gtk.ApplicationWindow):
         card.pack_start(self._draggable(banked_row), False, False, 0)
         card.pack_start(self._draggable(global_row), False, False, 0)
 
+        self.keeper_button = Gtk.ToggleButton(label="ENABLE 5H AUTO-ROLL")
+        self.keeper_button.set_name("keeper")
+        self.keeper_button.set_relief(Gtk.ReliefStyle.NONE)
+        self.keeper_button.set_tooltip_text(
+            "Uses one tiny Codex request after each five-hour reset"
+        )
+        self.keeper_button.connect("toggled", self._on_keeper_toggled)
+        card.pack_start(self.keeper_button, False, False, 4)
+
+        self.keeper_status = Gtk.Label(
+            label="Automatic 5-hour rolling is off",
+            xalign=0,
+        )
+        self.keeper_status.set_name("keeper-status")
+        self.keeper_status.set_line_wrap(True)
+        card.pack_start(self.keeper_status, False, False, 0)
+
         self.status = Gtk.Label(label="", xalign=0)
         self.status.set_name("status")
         self.status.set_line_wrap(True)
@@ -221,6 +251,21 @@ class WidgetWindow(Gtk.ApplicationWindow):
         self.show_all()
         self.present()
 
+    def set_window_keeper_state(self, enabled: bool, message: str) -> None:
+        self._keeper_syncing = True
+        self.keeper_button.set_active(enabled)
+        self.keeper_button.set_label(
+            "5H AUTO-ROLL: ON" if enabled else "ENABLE 5H AUTO-ROLL"
+        )
+        self.keeper_status.set_text(message)
+        self._keeper_syncing = False
+
+    def _on_keeper_toggled(self, button: Gtk.ToggleButton) -> None:
+        if self._keeper_syncing:
+            return
+        application = self.get_application()
+        application.set_window_keeper_enabled(button.get_active())
+
     def _set_last_reset(self, event: ResetEvent | None) -> None:
         occurred_at = (
             event.effective_at or event.announced_at if event is not None else None
@@ -252,9 +297,13 @@ class WidgetWindow(Gtk.ApplicationWindow):
         if (
             event.button != 1
             or event_widget is self.pin_button
+            or event_widget is self.keeper_button
             or (
                 event_widget is not None
-                and self.pin_button.is_ancestor(event_widget)
+                and (
+                    self.pin_button.is_ancestor(event_widget)
+                    or self.keeper_button.is_ancestor(event_widget)
+                )
             )
         ):
             return False

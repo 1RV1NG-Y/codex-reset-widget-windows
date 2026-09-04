@@ -4,6 +4,10 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
+import gi
+
+gi.require_version("Gdk", "3.0")
+gi.require_version("Gtk", "3.0")
 from gi.repository import Gdk, GLib
 
 from codex_widget.ui import WidgetWindow
@@ -40,6 +44,7 @@ class FakeWindow:
 
     def __init__(self, *, pinned: bool = False, active: bool = False):
         self.pin_button = FakeButton(pinned)
+        self.keeper_button = FakeButton()
         self.active = active
         self.hidden = False
         self.moved_to = None
@@ -119,6 +124,47 @@ class WidgetInteractionTests(unittest.TestCase):
 
         self.assertFalse(handled)
         self.assertIsNone(window.moved_to)
+
+    def test_keeper_button_is_not_a_drag_target(self):
+        window = FakeWindow()
+        event = SimpleNamespace(button=1, x_root=100, y_root=200)
+
+        with patch(
+            "codex_widget.ui.Gtk.get_event_widget",
+            return_value=window.keeper_button,
+        ):
+            handled = WidgetWindow._on_drag_press(window, None, event)
+
+        self.assertFalse(handled)
+        self.assertFalse(window._dragging)
+
+    def test_keeper_toggle_updates_application_setting(self):
+        application = Mock()
+        button = FakeButton(active=True)
+        window = SimpleNamespace(
+            _keeper_syncing=False,
+            get_application=lambda: application,
+        )
+
+        WidgetWindow._on_keeper_toggled(window, button)
+
+        application.set_window_keeper_enabled.assert_called_once_with(True)
+
+    def test_keeper_state_updates_control_and_status(self):
+        button = FakeButton()
+        status = Mock()
+        window = SimpleNamespace(
+            _keeper_syncing=False,
+            keeper_button=button,
+            keeper_status=status,
+        )
+
+        WidgetWindow.set_window_keeper_state(window, True, "Scheduled")
+
+        self.assertTrue(button.active)
+        self.assertEqual(button.label, "5H AUTO-ROLL: ON")
+        status.set_text.assert_called_once_with("Scheduled")
+        self.assertFalse(window._keeper_syncing)
 
     def test_drag_suppresses_focus_loss_until_release(self):
         window = FakeWindow()

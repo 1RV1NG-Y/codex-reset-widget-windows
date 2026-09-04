@@ -15,6 +15,7 @@ class StateStoreTests(unittest.TestCase):
             path = Path(directory) / "state.json"
             store = StateStore(path)
             state = AppState(
+                keep_five_hour_window_active=True,
                 last_seen_reset_id="tweet-42",
                 last_global_reset=ResetEvent(
                     event_id="tweet-42",

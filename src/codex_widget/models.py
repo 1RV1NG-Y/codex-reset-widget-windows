@@ -33,6 +33,7 @@ class UsageSnapshot:
 
 @dataclass(slots=True)
 class AppState:
+    keep_five_hour_window_active: bool = False
     last_seen_reset_id: str | None = None
     last_global_reset: ResetEvent | None = None
     last_known_usage: UsageSnapshot | None = None

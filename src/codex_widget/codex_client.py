@@ -30,9 +30,18 @@ def _number(value: object) -> float | None:
 
 
 class CodexClient:
-    def __init__(self, executable: str = "codex", *, timeout: float = 10.0) -> None:
+    def __init__(
+        self,
+        executable: str = "codex",
+        *,
+        timeout: float = 10.0,
+        activation_timeout: float = 60.0,
+        activation_model: str = "gpt-5.6-luna",
+    ) -> None:
         self.executable = executable
         self.timeout = timeout
+        self.activation_timeout = activation_timeout
+        self.activation_model = activation_model
 
     def read_rate_limits(self) -> UsageSnapshot:
         try:
@@ -83,6 +92,45 @@ class CodexClient:
                 except subprocess.TimeoutExpired:
                     process.kill()
                     process.wait()
+
+    def activate_five_hour_window(self) -> None:
+        arguments = [
+            self.executable,
+            "exec",
+            "--ephemeral",
+            "--skip-git-repo-check",
+            "--ignore-rules",
+            "--ignore-user-config",
+            "--sandbox",
+            "read-only",
+            "--model",
+            self.activation_model,
+            "-c",
+            'model_reasoning_effort="low"',
+            "--color",
+            "never",
+            "--cd",
+            "/tmp",
+            "Reply exactly OK.",
+        ]
+        try:
+            completed = subprocess.run(
+                arguments,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=self.activation_timeout,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise CodexClientError(
+                f"cannot activate five-hour window: {exc}"
+            ) from exc
+        if completed.returncode == 0:
+            return
+        detail = completed.stderr.strip().splitlines()
+        reason = detail[-1] if detail else f"exit status {completed.returncode}"
+        raise CodexClientError(f"five-hour activation failed: {reason}")
 
     @staticmethod
     def _send(process: subprocess.Popen[str], message: dict[str, Any]) -> None:

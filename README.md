@@ -12,6 +12,7 @@ A tiny resident Linux utility for monitoring Codex usage and global reset announ
 - Accepts verified archive records when the live feed changes shape, deduplicates events, and never replaces a newer saved reset with older source data.
 - Refreshes real account usage every 60 seconds while the widget is visible.
 - Shows five-hour and weekly usage with separate reset countdowns, plus banked resets and the latest global reset.
+- Optionally keeps the five-hour window rolling with one tiny ephemeral Codex request after each reset; this is off by default.
 - Correlates an active Tibo reset signal with a fresh low-usage account observation when the tracker has not confirmed it yet.
 - Lives in the GNOME AppIndicator tray with Open, Check Now, and Quit actions.
 - Drag from anywhere except the **PIN** control; pinned mode keeps the widget above other windows.
@@ -76,6 +77,19 @@ codex-widget --quit        # stop the resident application
 
 The tray menu also provides **Open Codex Widget**, **Check for resets now**, and **Quit Codex Widget**.
 
+### Optional five-hour auto-roll
+
+Use **ENABLE 5H AUTO-ROLL** in the widget to keep a five-hour window active
+continuously. The opt-in is persisted across restarts. When enabled, the resident
+process reads the current limits and schedules one ephemeral, read-only
+`gpt-5.6-luna` request for ten seconds after the active five-hour window resets.
+If no five-hour window is active, it starts one immediately.
+
+Each activation consumes a tiny but nonzero amount of weekly usage. The scheduler
+pauses at the weekly limit until its reset, retries transient failures after five
+minutes, and displays its next action or latest failure directly below the toggle.
+Disabling the toggle cancels the pending activation.
+
 Manage automatic startup with:
 
 ```bash
@@ -93,6 +107,8 @@ flowchart LR
     Notification -->|one account check| AppServer[Codex app-server]
     Launcher[GNOME menu or tray] --> Widget
     Widget -->|on demand| AppServer
+    AutoRoll[Optional 5-hour auto-roll] -->|one tiny request after reset| CodexExec[codex exec]
+    CodexExec --> AppServer
     Watcher --> State[XDG state JSON]
     AppServer --> Widget
 ```
@@ -104,7 +120,7 @@ The global event source and the personal account source intentionally remain sep
 
 ## Resource usage
 
-At idle, the resident GTK/Python process measured approximately 67 MB RSS and 0.0% CPU on the development system. Network activity is one small primary reset-feed request per minute, plus one fallback request only when the primary fails. Codex account queries run when the widget opens, once per minute while it remains visible, and once after a new reset event; they stop immediately when the widget hides.
+At idle, the resident GTK/Python process measured approximately 67 MB RSS and 0.0% CPU on the development system. Network activity is one small primary reset-feed request per minute, plus one fallback request only when the primary fails. Codex account queries run when the widget opens, once per minute while it remains visible, and once after a new reset event; visible-widget queries stop immediately when the widget hides. If five-hour auto-roll is enabled, the daemon also reads limits to schedule the next activation and sends one tiny Codex request per five-hour window.
 
 ## Development
 

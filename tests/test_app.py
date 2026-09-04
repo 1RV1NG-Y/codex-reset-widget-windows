@@ -1,14 +1,18 @@
 from __future__ import annotations
 
+import tempfile
+import threading
 import unittest
-from datetime import UTC, datetime
-from unittest.mock import patch
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from gi.repository import GLib
 
 from codex_widget.app import CodexWidgetApplication
-from codex_widget.models import ResetEvent, utc_now
+from codex_widget.models import ResetEvent, UsageSnapshot, utc_now
+from codex_widget.state import StateStore
 from codex_widget.watcher import PollOutcome
 
 
@@ -56,6 +60,162 @@ class RefreshApplication:
 
     def _run_async(self, work, done):
         self.async_calls.append((work, done))
+
+
+class WindowKeeperApplication:
+    _schedule_window_keeper_from_usage = (
+        CodexWidgetApplication._schedule_window_keeper_from_usage
+    )
+    _schedule_window_keeper_at = CodexWidgetApplication._schedule_window_keeper_at
+    _cancel_window_keeper_timer = CodexWidgetApplication._cancel_window_keeper_timer
+    _schedule_window_keeper_retry = (
+        CodexWidgetApplication._schedule_window_keeper_retry
+    )
+    _window_keeper_activation_finished = (
+        CodexWidgetApplication._window_keeper_activation_finished
+    )
+    set_window_keeper_enabled = CodexWidgetApplication.set_window_keeper_enabled
+
+    def __init__(self, state_store=None):
+        self.enabled = True
+        self._window_keeper_source = None
+        self._window_keeper_message = ""
+        self._window_keeper_busy = False
+        self._state_lock = threading.Lock()
+        self.state_store = state_store
+        self.messages = []
+        self.refreshes = 0
+        self.cancellations = 0
+
+    def _window_keeper_enabled(self):
+        return self.enabled
+
+    def _window_keeper_timer_fired(self):
+        return GLib.SOURCE_REMOVE
+
+
+    def _window_keeper_retry_fired(self):
+        return GLib.SOURCE_REMOVE
+    def _set_window_keeper_message(self, message):
+        self._window_keeper_message = message
+        self.messages.append(message)
+
+    def _refresh_window_keeper_schedule(self):
+        self.refreshes += 1
+
+    def _cancel_window_keeper_timer(self):
+        self.cancellations += 1
+        CodexWidgetApplication._cancel_window_keeper_timer(self)
+
+
+def usage_snapshot(
+    *,
+    weekly_used=25,
+    weekly_reset=None,
+    five_hour_reset=None,
+):
+    return UsageSnapshot(
+        used_percent=weekly_used,
+        reset_at=weekly_reset,
+        window_minutes=10080,
+        banked_resets=0,
+        five_hour_used_percent=1,
+        five_hour_reset_at=five_hour_reset,
+        five_hour_window_minutes=300,
+    )
+
+
+class WindowKeeperTests(unittest.TestCase):
+    def test_active_window_schedules_tiny_request_after_its_reset(self):
+        now = datetime(2026, 8, 31, 10, tzinfo=UTC)
+        application = WindowKeeperApplication()
+        usage = usage_snapshot(five_hour_reset=now + timedelta(hours=1))
+
+        with (
+            patch("codex_widget.app.utc_now", return_value=now),
+            patch(
+                "codex_widget.app.GLib.timeout_add_seconds",
+                return_value=72,
+            ) as schedule,
+        ):
+            application._schedule_window_keeper_from_usage(usage)
+
+        schedule.assert_called_once_with(3610, application._window_keeper_timer_fired)
+        self.assertEqual(application._window_keeper_source, 72)
+        self.assertIn("next tiny request", application.messages[-1])
+
+    def test_weekly_limit_pauses_activation_until_weekly_reset(self):
+        now = datetime(2026, 8, 31, 10, tzinfo=UTC)
+        application = WindowKeeperApplication()
+        usage = usage_snapshot(
+            weekly_used=100,
+            weekly_reset=now + timedelta(hours=2),
+            five_hour_reset=now + timedelta(hours=1),
+        )
+
+        with (
+            patch("codex_widget.app.utc_now", return_value=now),
+            patch(
+                "codex_widget.app.GLib.timeout_add_seconds",
+                return_value=73,
+            ) as schedule,
+        ):
+            application._schedule_window_keeper_from_usage(usage)
+
+        schedule.assert_called_once_with(7210, application._window_keeper_timer_fired)
+        self.assertIn("weekly limit", application.messages[-1])
+
+    def test_missing_active_window_schedules_immediate_activation(self):
+        now = datetime(2026, 8, 31, 10, tzinfo=UTC)
+        application = WindowKeeperApplication()
+
+        with (
+            patch("codex_widget.app.utc_now", return_value=now),
+            patch(
+                "codex_widget.app.GLib.timeout_add_seconds",
+                return_value=74,
+            ) as schedule,
+        ):
+            application._schedule_window_keeper_from_usage(usage_snapshot())
+
+        schedule.assert_called_once_with(1, application._window_keeper_timer_fired)
+        self.assertIn("activating an idle window", application.messages[-1])
+
+    def test_toggle_persists_opt_in_and_starts_or_cancels_scheduler(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = StateStore(Path(directory) / "state.json")
+            application = WindowKeeperApplication(store)
+
+            application.set_window_keeper_enabled(True)
+            self.assertTrue(store.load().keep_five_hour_window_active)
+            self.assertEqual(application.refreshes, 1)
+
+            application.set_window_keeper_enabled(False)
+            self.assertFalse(store.load().keep_five_hour_window_active)
+            self.assertEqual(application.cancellations, 1)
+            self.assertEqual(
+                application.messages[-1],
+                "Automatic 5-hour rolling is off",
+            )
+
+    def test_activation_failure_surfaces_error_and_retries_in_five_minutes(self):
+        application = WindowKeeperApplication()
+
+        with patch(
+            "codex_widget.app.GLib.timeout_add_seconds",
+            return_value=75,
+        ) as schedule:
+            application._window_keeper_activation_finished(
+                None,
+                RuntimeError("offline"),
+            )
+
+        schedule.assert_called_once_with(
+            300,
+            application._window_keeper_retry_fired,
+        )
+        self.assertEqual(application._window_keeper_source, 75)
+        self.assertIn("offline", application.messages[-1])
 
 
 class ResetDemoTests(unittest.TestCase):
