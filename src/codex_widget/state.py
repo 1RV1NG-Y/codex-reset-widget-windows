@@ -112,6 +112,17 @@ class StateStore:
             keep_five_hour_window_active=(
                 document.get("keep_five_hour_window_active") is True
             ),
+            last_window_keeper_attempt_at=_parse_time(
+                document.get("last_window_keeper_attempt_at")
+            ),
+            last_window_keeper_success_at=_parse_time(
+                document.get("last_window_keeper_success_at")
+            ),
+            last_window_keeper_error=(
+                document.get("last_window_keeper_error")
+                if isinstance(document.get("last_window_keeper_error"), str)
+                else None
+            ),
         )
 
     def save(self, state: AppState) -> None:
@@ -121,6 +132,13 @@ class StateStore:
             "last_global_reset": None,
             "last_known_usage": None,
             "keep_five_hour_window_active": state.keep_five_hour_window_active,
+            "last_window_keeper_attempt_at": _format_time(
+                state.last_window_keeper_attempt_at
+            ),
+            "last_window_keeper_success_at": _format_time(
+                state.last_window_keeper_success_at
+            ),
+            "last_window_keeper_error": state.last_window_keeper_error,
         }
         if state.last_global_reset is not None:
             event = state.last_global_reset

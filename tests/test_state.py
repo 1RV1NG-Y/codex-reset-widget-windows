@@ -16,6 +16,13 @@ class StateStoreTests(unittest.TestCase):
             store = StateStore(path)
             state = AppState(
                 keep_five_hour_window_active=True,
+                last_window_keeper_attempt_at=datetime(
+                    2026, 8, 10, 10, tzinfo=UTC
+                ),
+                last_window_keeper_success_at=datetime(
+                    2026, 8, 10, 10, 0, 4, tzinfo=UTC
+                ),
+                last_window_keeper_error="temporary network failure",
                 last_seen_reset_id="tweet-42",
                 last_global_reset=ResetEvent(
                     event_id="tweet-42",

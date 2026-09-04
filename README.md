@@ -86,8 +86,9 @@ process reads the current limits and schedules one ephemeral, read-only
 If no five-hour window is active, it starts one immediately.
 
 Each activation consumes a tiny but nonzero amount of weekly usage. The scheduler
-pauses at the weekly limit until its reset, retries transient failures after five
-minutes, and displays its next action or latest failure directly below the toggle.
+pauses at the weekly limit, retries failures after one minute, and runs an
+independent one-minute watchdog so a missed long timer cannot leave the window
+idle. The widget shows both the next action and the last successful request.
 Disabling the toggle cancels the pending activation.
 
 Manage automatic startup with:
