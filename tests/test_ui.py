@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 import unittest
+import sys
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
+
+if sys.platform == "win32":
+    raise unittest.SkipTest("GTK UI tests run on Linux")
 
 import gi
 

@@ -3,10 +3,14 @@ from __future__ import annotations
 import tempfile
 import threading
 import unittest
+import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
+
+if sys.platform == "win32":
+    raise unittest.SkipTest("GTK application tests run on Linux")
 
 from gi.repository import GLib
 

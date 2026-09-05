@@ -12,6 +12,12 @@ _STATE_VERSION = 1
 
 
 def _default_state_path() -> Path:
+    if os.name == "nt":
+        root = os.environ.get("LOCALAPPDATA")
+        if root:
+            return Path(root) / "CodexWidget" / "state.json"
+        return Path.home() / "AppData" / "Local" / "CodexWidget" / "state.json"
+
     root = os.environ.get("XDG_STATE_HOME")
     if root:
         return Path(root) / "codex-widget" / "state.json"

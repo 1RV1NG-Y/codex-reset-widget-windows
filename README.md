@@ -1,4 +1,62 @@
-# Codex Reset Widget
+# Codex Reset Widget for Windows
+
+Windows port of [codex-reset-widget](https://github.com/1RV1NG-Y/codex-reset-widget).
+
+## Windows port
+
+Windows 10/11 is supported using Python's Tk interface and the native Windows
+notification area. No GTK, systemd, pip packages, or administrator access is needed.
+The original Linux frontend remains available.
+
+Requirements: Python 3.11+ with Tcl/Tk (the normal python.org installer includes it),
+and an authenticated Codex CLI. The Windows Codex desktop CLI is also discovered
+automatically.
+
+From PowerShell:
+
+```powershell
+git clone https://github.com/1RV1NG-Y/codex-reset-widget-windows.git
+cd codex-reset-widget-windows
+powershell -NoProfile -ExecutionPolicy Bypass -File .\install-windows.ps1
+```
+
+This copies the app into `%LOCALAPPDATA%\CodexWidget`, adds **Codex Widget** to
+the Start menu, and opens it without a console window. The checkout can then be
+moved independently. To also start the watcher when you sign in, run the same
+installer with `-EnableStartup`. To install without opening it, use `-NoLaunch`.
+
+For a portable run, double-click `launch-codex-widget.pyw`, or use:
+
+```powershell
+python .\launch-codex-widget.pyw
+python .\launch-codex-widget.pyw --daemon
+python .\launch-codex-widget.pyw --demo-reset
+python .\launch-codex-widget.pyw --quit
+```
+
+Click the tray icon to open the card; right-click for Open, Check Now, and Quit.
+Windows may put the icon in its tray overflow. PIN keeps the card above other
+windows; Escape hides and unpins it. Reset alerts use Windows tray balloon
+notifications and follow Windows notification settings. Five-hour auto-roll is
+off by default; enabling it sends a small Codex request when a window expires.
+
+State lives in `%LOCALAPPDATA%\CodexWidget\state.json`. If a console-free launch
+fails, details are saved alongside it in `error.log`. To update, rerun the installer.
+To uninstall, quit through the tray, delete the Codex Widget shortcuts from the
+Start menu and `shell:startup`, then delete `%LOCALAPPDATA%\CodexWidget` (including
+saved state).
+
+Run Windows tests with:
+
+```powershell
+$env:PYTHONPATH = 'src'
+python -m unittest discover -s tests -v
+```
+
+GTK-specific tests are skipped on Windows; the shared backend and Windows frontend
+have their own tests.
+
+## Original Linux version
 
 A tiny resident Linux utility for monitoring Codex usage and global reset announcements. It stays out of the way in the GNOME status tray, opens as a compact transient card, and surfaces reset notifications without requiring a tracker website to remain open.
 

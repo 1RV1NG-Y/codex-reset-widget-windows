@@ -11,6 +11,11 @@ def _prefer_x11_backend() -> None:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    if sys.platform == "win32":
+        from .windows_app import CodexWidgetApplication
+
+        arguments = [sys.argv[0], *(argv if argv is not None else sys.argv[1:])]
+        return CodexWidgetApplication().run(arguments)
     _prefer_x11_backend()
     try:
         from .app import CodexWidgetApplication
