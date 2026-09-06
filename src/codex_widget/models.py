@@ -34,6 +34,8 @@ class UsageSnapshot:
 @dataclass(slots=True)
 class AppState:
     keep_five_hour_window_active: bool = False
+    next_window_keeper_due_at: datetime | None = None
+    next_window_keeper_retry_at: datetime | None = None
     last_window_keeper_attempt_at: datetime | None = None
     last_window_keeper_success_at: datetime | None = None
     last_window_keeper_error: str | None = None

@@ -18,6 +18,12 @@ class StateStoreTests(unittest.TestCase):
             store = StateStore(path)
             state = AppState(
                 keep_five_hour_window_active=True,
+                next_window_keeper_due_at=datetime(
+                    2026, 8, 10, 15, 0, 10, tzinfo=UTC
+                ),
+                next_window_keeper_retry_at=datetime(
+                    2026, 8, 10, 10, 1, tzinfo=UTC
+                ),
                 last_window_keeper_attempt_at=datetime(
                     2026, 8, 10, 10, tzinfo=UTC
                 ),

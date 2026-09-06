@@ -118,6 +118,12 @@ class StateStore:
             keep_five_hour_window_active=(
                 document.get("keep_five_hour_window_active") is True
             ),
+            next_window_keeper_due_at=_parse_time(
+                document.get("next_window_keeper_due_at")
+            ),
+            next_window_keeper_retry_at=_parse_time(
+                document.get("next_window_keeper_retry_at")
+            ),
             last_window_keeper_attempt_at=_parse_time(
                 document.get("last_window_keeper_attempt_at")
             ),
@@ -138,6 +144,12 @@ class StateStore:
             "last_global_reset": None,
             "last_known_usage": None,
             "keep_five_hour_window_active": state.keep_five_hour_window_active,
+            "next_window_keeper_due_at": _format_time(
+                state.next_window_keeper_due_at
+            ),
+            "next_window_keeper_retry_at": _format_time(
+                state.next_window_keeper_retry_at
+            ),
             "last_window_keeper_attempt_at": _format_time(
                 state.last_window_keeper_attempt_at
             ),

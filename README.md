@@ -39,6 +39,10 @@ Windows may put the icon in its tray overflow. PIN keeps the card above other
 windows; Escape hides and unpins it. Reset alerts use Windows tray balloon
 notifications and follow Windows notification settings. Five-hour auto-roll is
 off by default; enabling it sends a small Codex request when a window expires.
+The next auto-roll deadline is saved across restarts. Usage refreshes cannot keep
+postponing it when an idle account reports a moving reset time. If Windows sleeps
+through a deadline, the watcher checks again after wake; it cannot send requests
+while the PC is asleep or the widget is stopped.
 
 State lives in `%LOCALAPPDATA%\CodexWidget\state.json`. If a console-free launch
 fails, details are saved alongside it in `error.log`. To update, rerun the installer.

@@ -37,36 +37,78 @@ class TimerApplication:
     _schedule_window_keeper_from_usage = (
         CodexWidgetApplication._schedule_window_keeper_from_usage
     )
+    _choose_window_keeper_due_at = CodexWidgetApplication._choose_window_keeper_due_at
+    _usage_has_active_five_hour_window = (
+        CodexWidgetApplication._usage_has_active_five_hour_window
+    )
+    _usage_looks_like_idle_five_hour_window = (
+        CodexWidgetApplication._usage_looks_like_idle_five_hour_window
+    )
+    _window_keeper_window_seconds = staticmethod(
+        CodexWidgetApplication._window_keeper_window_seconds
+    )
     _schedule_window_keeper_retry = (
         CodexWidgetApplication._schedule_window_keeper_retry
     )
+    _schedule_window_keeper_retry_at = (
+        CodexWidgetApplication._schedule_window_keeper_retry_at
+    )
     _schedule_window_keeper_at = CodexWidgetApplication._schedule_window_keeper_at
     _cancel_window_keeper_timer = CodexWidgetApplication._cancel_window_keeper_timer
+    _start_window_keeper_watchdog = (
+        CodexWidgetApplication._start_window_keeper_watchdog
+    )
+    _cancel_window_keeper_watchdog = (
+        CodexWidgetApplication._cancel_window_keeper_watchdog
+    )
+    _window_keeper_watchdog_tick = (
+        CodexWidgetApplication._window_keeper_watchdog_tick
+    )
+    _window_keeper_activation_finished = (
+        CodexWidgetApplication._window_keeper_activation_finished
+    )
     _window_keeper_history_suffix = CodexWidgetApplication._window_keeper_history_suffix
+    set_window_keeper_enabled = CodexWidgetApplication.set_window_keeper_enabled
 
     def __init__(self) -> None:
         self.state_store = MemoryStateStore()
         self._state_lock = threading.Lock()
         self._window_keeper_source = None
+        self._window_keeper_watchdog_source = None
+        self._window_keeper_busy = False
+        self.refreshes = 0
+        self.activations = 0
+        self.cancellations = 0
         self.messages: list[str] = []
         self.scheduled: list[tuple[int | float, object, tuple[object, ...]]] = []
         self.window = None
 
     def _window_keeper_enabled(self) -> bool:
-        return True
+        return self.state_store.state.keep_five_hour_window_active
 
     def _after_seconds(self, seconds, callback, *args):
         self.scheduled.append((seconds, callback, args))
         return f"after-{len(self.scheduled)}"
 
     def _cancel_source(self, _source):
+        self.cancellations += 1
         return None
 
     def _set_window_keeper_message(self, message: str) -> None:
         self.messages.append(message)
 
     def _window_keeper_timer_fired(self) -> None:
+        self._window_keeper_source = None
+        self.activations += 1
         return None
+
+    def _window_keeper_retry_fired(self) -> None:
+        self._window_keeper_source = None
+        self.refreshes += 1
+        return None
+
+    def _refresh_window_keeper_schedule(self) -> None:
+        self.refreshes += 1
 
 
 class NotificationApplication:
@@ -116,6 +158,7 @@ class WindowsAppUnitTests(unittest.TestCase):
     def test_window_keeper_schedule_uses_tk_after_adapter(self) -> None:
         now = datetime(2026, 8, 31, 10, tzinfo=UTC)
         application = TimerApplication()
+        application.state_store.state.keep_five_hour_window_active = True
         usage = UsageSnapshot(
             used_percent=25,
             reset_at=None,
@@ -131,6 +174,220 @@ class WindowsAppUnitTests(unittest.TestCase):
 
         self.assertEqual(application.scheduled[0][0], 3610)
         self.assertIn("next tiny request", application.messages[-1])
+        self.assertEqual(
+            application.state_store.state.next_window_keeper_due_at,
+            now + timedelta(hours=1, seconds=10),
+        )
+
+    def test_window_keeper_does_not_postpone_repeated_drifting_resets(self) -> None:
+        start = datetime(2026, 8, 31, 10, tzinfo=UTC)
+        application = TimerApplication()
+        application.state_store.state.keep_five_hour_window_active = True
+
+        for minutes in (0, 1, 60, 300):
+            now = start + timedelta(minutes=minutes)
+            usage = UsageSnapshot(
+                used_percent=25,
+                reset_at=None,
+                window_minutes=10080,
+                banked_resets=0,
+                five_hour_used_percent=1,
+                five_hour_reset_at=now + timedelta(hours=5),
+                five_hour_window_minutes=300,
+                checked_at=now,
+            )
+            with patch("codex_widget.windows_app.utc_now", return_value=now):
+                application._schedule_window_keeper_from_usage(usage)
+
+        fixed_due = start + timedelta(hours=5, seconds=10)
+        self.assertEqual(
+            application.state_store.state.next_window_keeper_due_at,
+            fixed_due,
+        )
+        self.assertEqual(application.scheduled[-1][0], 10)
+        self.assertIn("next tiny request", application.messages[-1])
+
+    def test_window_keeper_idle_zero_usage_starts_immediately(self) -> None:
+        now = datetime(2026, 8, 31, 10, tzinfo=UTC)
+        application = TimerApplication()
+        application.state_store.state.keep_five_hour_window_active = True
+        usage = UsageSnapshot(
+            used_percent=25,
+            reset_at=None,
+            window_minutes=10080,
+            banked_resets=0,
+            five_hour_used_percent=0,
+            five_hour_reset_at=now + timedelta(hours=5),
+            five_hour_window_minutes=300,
+            checked_at=now,
+        )
+
+        with patch("codex_widget.windows_app.utc_now", return_value=now):
+            application._schedule_window_keeper_from_usage(usage)
+
+        self.assertEqual(application.scheduled[-1][0], 1)
+        self.assertEqual(
+            application.state_store.state.next_window_keeper_due_at,
+            now + timedelta(seconds=1),
+        )
+
+    def test_window_keeper_recovers_overdue_restart_from_last_success(self) -> None:
+        now = datetime(2026, 8, 31, 10, tzinfo=UTC)
+        application = TimerApplication()
+        application.state_store.state.keep_five_hour_window_active = True
+        application.state_store.state.last_window_keeper_success_at = (
+            now - timedelta(hours=6)
+        )
+        usage = UsageSnapshot(
+            used_percent=25,
+            reset_at=None,
+            window_minutes=10080,
+            banked_resets=0,
+            five_hour_used_percent=0,
+            five_hour_reset_at=now + timedelta(hours=5),
+            five_hour_window_minutes=300,
+            checked_at=now,
+        )
+
+        with patch("codex_widget.windows_app.utc_now", return_value=now):
+            application._schedule_window_keeper_from_usage(usage)
+
+        self.assertEqual(application.scheduled[-1][0], 1)
+        self.assertIn("activating an overdue window", application.messages[-1])
+
+    def test_window_keeper_overdue_due_respects_current_active_window(self) -> None:
+        now = datetime(2026, 8, 31, 10, tzinfo=UTC)
+        application = TimerApplication()
+        application.state_store.state.keep_five_hour_window_active = True
+        application.state_store.state.next_window_keeper_due_at = (
+            now - timedelta(hours=1)
+        )
+        usage = UsageSnapshot(
+            used_percent=25,
+            reset_at=None,
+            window_minutes=10080,
+            banked_resets=0,
+            five_hour_used_percent=5,
+            five_hour_reset_at=now + timedelta(hours=4),
+            five_hour_window_minutes=300,
+            checked_at=now,
+        )
+
+        with patch("codex_widget.windows_app.utc_now", return_value=now):
+            application._schedule_window_keeper_from_usage(usage)
+
+        self.assertEqual(application.activations, 0)
+        self.assertEqual(
+            application.state_store.state.next_window_keeper_due_at,
+            now + timedelta(hours=4, seconds=10),
+        )
+
+    def test_window_keeper_watchdog_fires_late_overdue_due(self) -> None:
+        now = datetime(2026, 8, 31, 10, tzinfo=UTC)
+        application = TimerApplication()
+        application.state_store.state.keep_five_hour_window_active = True
+        application.state_store.state.next_window_keeper_due_at = (
+            now - timedelta(minutes=3)
+        )
+        application._window_keeper_source = "after-long-window"
+
+        with patch("codex_widget.windows_app.utc_now", return_value=now):
+            application._window_keeper_watchdog_tick()
+
+        self.assertEqual(application.activations, 1)
+        self.assertIsNotNone(application._window_keeper_watchdog_source)
+
+    def test_window_keeper_failure_keeps_due_and_uses_retry_timer(self) -> None:
+        now = datetime(2026, 8, 31, 10, tzinfo=UTC)
+        application = TimerApplication()
+        application.state_store.state.keep_five_hour_window_active = True
+        due = now - timedelta(minutes=1)
+        application.state_store.state.next_window_keeper_due_at = due
+
+        with patch("codex_widget.windows_app.utc_now", return_value=now):
+            application._window_keeper_activation_finished(None, RuntimeError("nope"))
+
+        self.assertEqual(application.state_store.state.next_window_keeper_due_at, due)
+        self.assertEqual(
+            application.state_store.state.next_window_keeper_retry_at,
+            now + timedelta(seconds=60),
+        )
+        self.assertEqual(application.scheduled[-1][0], 60)
+        self.assertIn("activation failed", application.messages[-1])
+
+    def test_window_keeper_refresh_respects_failure_backoff(self) -> None:
+        now = datetime(2026, 8, 31, 10, tzinfo=UTC)
+        application = TimerApplication()
+        application.state_store.state.keep_five_hour_window_active = True
+        application.state_store.state.next_window_keeper_due_at = (
+            now - timedelta(minutes=1)
+        )
+        application.state_store.state.next_window_keeper_retry_at = (
+            now + timedelta(seconds=60)
+        )
+        application.state_store.state.last_window_keeper_error = "nope"
+        application._window_keeper_source = "after-retry"
+        usage = UsageSnapshot(
+            used_percent=25,
+            reset_at=None,
+            window_minutes=10080,
+            banked_resets=0,
+            five_hour_used_percent=0,
+            five_hour_reset_at=now + timedelta(hours=5),
+            five_hour_window_minutes=300,
+            checked_at=now,
+        )
+
+        with patch("codex_widget.windows_app.utc_now", return_value=now):
+            application._schedule_window_keeper_from_usage(usage)
+
+        self.assertEqual(application.activations, 0)
+        self.assertEqual(application.scheduled[-1][0], 60)
+        self.assertEqual(
+            application.state_store.state.next_window_keeper_retry_at,
+            now + timedelta(seconds=60),
+        )
+
+    def test_window_keeper_weekly_limit_pauses_until_weekly_reset(self) -> None:
+        now = datetime(2026, 8, 31, 10, tzinfo=UTC)
+        application = TimerApplication()
+        application.state_store.state.keep_five_hour_window_active = True
+        usage = UsageSnapshot(
+            used_percent=100,
+            reset_at=now + timedelta(days=1),
+            window_minutes=10080,
+            banked_resets=0,
+            five_hour_used_percent=0,
+            five_hour_reset_at=now + timedelta(hours=5),
+            five_hour_window_minutes=300,
+            checked_at=now,
+        )
+
+        with patch("codex_widget.windows_app.utc_now", return_value=now):
+            application._schedule_window_keeper_from_usage(usage)
+
+        self.assertEqual(application.scheduled[-1][0], 86410)
+        self.assertIn("paused at the weekly limit", application.messages[-1])
+
+    def test_window_keeper_disable_clears_persisted_due_and_cancels_timers(self) -> None:
+        application = TimerApplication()
+        application.state_store.state.keep_five_hour_window_active = True
+        application.state_store.state.next_window_keeper_due_at = datetime(
+            2026, 8, 31, 15, tzinfo=UTC
+        )
+        application.state_store.state.next_window_keeper_retry_at = datetime(
+            2026, 8, 31, 10, 1, tzinfo=UTC
+        )
+        application._window_keeper_source = "after-keeper"
+        application._window_keeper_watchdog_source = "after-watchdog"
+
+        application.set_window_keeper_enabled(False)
+
+        self.assertFalse(application.state_store.state.keep_five_hour_window_active)
+        self.assertIsNone(application.state_store.state.next_window_keeper_due_at)
+        self.assertIsNone(application.state_store.state.next_window_keeper_retry_at)
+        self.assertIsNone(application._window_keeper_source)
+        self.assertIsNone(application._window_keeper_watchdog_source)
 
     def test_notification_keeps_two_stage_event_state(self) -> None:
         application = NotificationApplication()
