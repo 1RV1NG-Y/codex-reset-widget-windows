@@ -1,10 +1,13 @@
 [CmdletBinding()]
 param(
     [string]$InstallDir = (Join-Path $env:LOCALAPPDATA 'CodexWidget'),
+    # Retained for callers of older installers; startup is now the default.
     [switch]$EnableStartup,
+    [switch]$NoStartup,
     [switch]$NoLaunch
 )
 $ErrorActionPreference = 'Stop'
+if ($EnableStartup -and $NoStartup) { throw 'Choose either -EnableStartup or -NoStartup.' }
 
 # Use the actual interpreter, not a Store execution alias, in the shortcuts.
 $python = Get-Command python.exe -ErrorAction SilentlyContinue
@@ -37,10 +40,16 @@ function New-WidgetShortcut([string]$Path, [string]$ExtraArgs) {
 }
 $programs = [Environment]::GetFolderPath('Programs')
 New-WidgetShortcut (Join-Path $programs 'Codex Widget.lnk') ''
-if ($EnableStartup) {
-    New-WidgetShortcut (Join-Path ([Environment]::GetFolderPath('Startup')) 'Codex Widget.lnk') ' --daemon'
+$startupShortcut = Join-Path ([Environment]::GetFolderPath('Startup')) 'Codex Widget.lnk'
+if ($NoStartup) {
+    if (Test-Path -LiteralPath $startupShortcut) {
+        Remove-Item -LiteralPath $startupShortcut
+    }
+} else {
+    New-WidgetShortcut $startupShortcut ' --daemon'
 }
 if (-not $NoLaunch) {
     Start-Process -FilePath $pythonw -ArgumentList ('"' + $launcher + '"') -WorkingDirectory $InstallDir -WindowStyle Hidden
 }
 Write-Output "Installed to $InstallDir. Open Codex Widget from the Start menu."
+if (-not $NoStartup) { Write-Output 'Startup enabled: the tray watcher will run automatically whenever you sign in.' }

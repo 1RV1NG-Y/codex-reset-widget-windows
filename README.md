@@ -21,9 +21,11 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\install-windows.ps1
 ```
 
 This copies the app into `%LOCALAPPDATA%\CodexWidget`, adds **Codex Widget** to
-the Start menu, and opens it without a console window. The checkout can then be
-moved independently. To also start the watcher when you sign in, run the same
-installer with `-EnableStartup`. To install without opening it, use `-NoLaunch`.
+the Start menu, opens it without a console window, and enables the tray watcher
+automatically whenever you sign in to Windows. The checkout can then be moved
+independently. Use `-NoStartup` to opt out of sign-in startup (also removes an
+existing startup shortcut), or `-NoLaunch` to install without opening it now.
+The older `-EnableStartup` flag is still accepted.
 
 For a portable run, double-click `launch-codex-widget.pyw`, or use:
 
