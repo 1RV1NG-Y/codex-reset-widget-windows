@@ -118,6 +118,8 @@ def _parse_arguments(arguments: Sequence[str]) -> _ParsedArguments:
 
 
 def _user_data_dir() -> Path:
+    if os.environ.get("CODEX_WIDGET_DATA_DIR"):
+        return Path(os.environ["CODEX_WIDGET_DATA_DIR"])
     local = os.environ.get("LOCALAPPDATA")
     if local:
         return Path(local) / "CodexWidget"

@@ -12,6 +12,8 @@ _STATE_VERSION = 1
 
 
 def _default_state_path() -> Path:
+    if os.environ.get("CODEX_WIDGET_DATA_DIR"):
+        return Path(os.environ["CODEX_WIDGET_DATA_DIR"]) / "state.json"
     if os.name == "nt":
         root = os.environ.get("LOCALAPPDATA")
         if root:

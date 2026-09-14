@@ -21,10 +21,13 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\install-windows.ps1
 ```
 
 This copies the app into `%LOCALAPPDATA%\CodexWidget`, adds **Codex Widget** to
-the Start menu, opens it without a console window, and enables the tray watcher
+the Start menu, starts it in the tray without a console window, and enables the watcher
 automatically whenever you sign in to Windows. The checkout can then be moved
-independently. Use `-NoStartup` to opt out of sign-in startup (also removes an
-existing startup shortcut), or `-NoLaunch` to install without opening it now.
+independently. Startup uses the **Codex Widget** task in Windows Task Scheduler,
+running in your desktop session 15 seconds after sign-in. It retries failed
+launches and keeps running on battery power without a time limit.
+Use `-NoStartup` to remove sign-in startup, or `-NoLaunch` to install without
+opening it now. Updating migrates the old Startup-folder shortcut to the task.
 The older `-EnableStartup` flag is still accepted.
 
 For a portable run, double-click `launch-codex-widget.pyw`, or use:
@@ -46,11 +49,23 @@ postponing it when an idle account reports a moving reset time. If Windows sleep
 through a deadline, the watcher checks again after wake; it cannot send requests
 while the PC is asleep or the widget is stopped.
 
-State lives in `%LOCALAPPDATA%\CodexWidget\state.json`. If a console-free launch
-fails, details are saved alongside it in `error.log`. To update, rerun the installer.
-To uninstall, quit through the tray, delete the Codex Widget shortcuts from the
-Start menu and `shell:startup`, then delete `%LOCALAPPDATA%\CodexWidget` (including
-saved state).
+State lives in `%LOCALAPPDATA%\CodexWidget\state.json`. Startup, exit, and failure
+details are recorded alongside it in `launcher.log`. To update, rerun the installer.
+When installed from a packaged app that redirects AppData, the installer records
+the physical installation path in the shortcuts and task. The installed launcher
+keeps state and logs in that same directory, so sign-in launches use your existing
+settings. The installer prints this resolved location.
+To uninstall, run the installer with `-NoStartup -NoLaunch`, quit through the tray,
+delete the Codex Widget Start menu shortcut, then delete `%LOCALAPPDATA%\CodexWidget`
+(including saved state).
+
+You can inspect or start the logon task from PowerShell:
+
+```powershell
+Get-ScheduledTask -TaskName 'Codex Widget'
+Get-ScheduledTaskInfo -TaskName 'Codex Widget'
+Start-ScheduledTask -TaskName 'Codex Widget'
+```
 
 Run Windows tests with:
 
