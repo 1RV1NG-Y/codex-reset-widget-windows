@@ -259,6 +259,61 @@ class CodexClientTests(unittest.TestCase):
             ):
                 self.assertEqual(_resolve_executable("codex"), str(new))
 
+    def test_resident_client_reads_after_codex_executable_is_replaced(self):
+        script = '''
+            import json, sys
+            for line in sys.stdin:
+                request = json.loads(line)
+                if request.get("method") == "initialize":
+                    print(json.dumps({"id": 1, "result": {}}), flush=True)
+                elif request.get("method") == "account/rateLimits/read":
+                    print(json.dumps({"id": 2, "result": {"rateLimits": {
+                        "primary": {"windowDurationMins": 10080, "usedPercent": 42}
+                    }}}), flush=True)
+                    break
+        '''
+        with tempfile.TemporaryDirectory() as directory:
+            old_dir, new_dir = Path(directory) / 'old', Path(directory) / 'new'
+            old_dir.mkdir()
+            new_dir.mkdir()
+            old = _fake_codex_executable(old_dir, script)
+            new = _fake_codex_executable(new_dir, script)
+            current = str(old)
+            with patch('codex_widget.codex_client._resolve_executable', side_effect=lambda _: current):
+                client = CodexClient()
+                self.assertEqual(client.read_rate_limits().used_percent, 42)
+                old.unlink()
+                current = str(new)
+                self.assertEqual(client.read_rate_limits().used_percent, 42)
+
+    def test_auto_roll_rediscovers_cli_with_stale_startup_path(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / 'OpenAI' / 'Codex' / 'bin'
+            old, new = root / 'old' / 'codex.exe', root / 'new' / 'codex.exe'
+            old.parent.mkdir(parents=True)
+            old.touch()
+            with patch.dict(os.environ, {'LOCALAPPDATA': directory}), patch(
+                'codex_widget.codex_client.os.name', 'nt'
+            ), patch('codex_widget.codex_client.shutil.which', return_value=None), patch(
+                'codex_widget.codex_client.subprocess.run',
+                return_value=SimpleNamespace(returncode=0, stderr='')
+            ) as run:
+                client = CodexClient()
+                client.activate_five_hour_window()
+                self.assertEqual(run.call_args.args[0][0], str(old))
+                old.unlink()
+                new.parent.mkdir()
+                new.touch()
+                client.activate_five_hour_window()
+                self.assertEqual(run.call_args.args[0][0], str(new))
+
+    def test_explicit_executable_path_is_not_replaced_by_discovery(self):
+        client = CodexClient(executable='/custom/codex')
+        with patch('codex_widget.codex_client.shutil.which') as lookup:
+            self.assertEqual(client.executable, '/custom/codex')
+            self.assertEqual(client.executable, '/custom/codex')
+        lookup.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

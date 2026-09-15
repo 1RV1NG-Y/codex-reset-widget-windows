@@ -9,8 +9,9 @@ notification area. No GTK, systemd, pip packages, or administrator access is nee
 The original Linux frontend remains available.
 
 Requirements: Python 3.11+ with Tcl/Tk (the normal python.org installer includes it),
-and an authenticated Codex CLI. The Windows Codex desktop CLI is also discovered
-automatically.
+and an authenticated Codex CLI. The Windows Codex desktop CLI is discovered
+before each account read and auto-roll request, so its changing installation path
+is picked up after app updates without restarting the widget.
 
 From PowerShell:
 

@@ -169,10 +169,17 @@ class CodexClient:
         activation_timeout: float = 60.0,
         activation_model: str = "gpt-5.6-luna",
     ) -> None:
-        self.executable = _resolve_executable(executable)
+        self._requested_executable = executable
         self.timeout = timeout
         self.activation_timeout = activation_timeout
         self.activation_model = activation_model
+
+    @property
+    def executable(self) -> str:
+        # The desktop app replaces its versioned CLI directory during updates.
+        # Keep the requested command, not a path that can disappear while this
+        # resident client is alive. Explicit caller-supplied paths stay explicit.
+        return _resolve_executable(self._requested_executable)
 
     def read_rate_limits(self) -> UsageSnapshot:
         reader: _ProcessLineReader | None = None
