@@ -68,10 +68,10 @@ if (Test-Path -LiteralPath $launcher) {
     & $pythonExe $launcher --quit
     # A new launch would hand its command to an instance that is still exiting.
     $deadline = (Get-Date).AddSeconds(15)
-    while ((Get-WidgetProcesses $launcher).Count -gt 0 -and (Get-Date) -lt $deadline) {
+    while (@(Get-WidgetProcesses $launcher).Count -gt 0 -and (Get-Date) -lt $deadline) {
         Start-Sleep -Milliseconds 250
     }
-    $remaining = Get-WidgetProcesses $launcher
+    $remaining = @(Get-WidgetProcesses $launcher)
     if ($remaining.Count -gt 0) {
         Write-Warning 'The running widget did not exit within 15 seconds; stopping it.'
         $remaining | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
