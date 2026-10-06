@@ -114,6 +114,9 @@ class StateStore:
 
         last_seen = document.get("last_seen_reset_id")
         return AppState(
+            selected_provider=(
+                "claude" if document.get("selected_provider") == "claude" else "codex"
+            ),
             last_seen_reset_id=last_seen if isinstance(last_seen, str) else None,
             last_global_reset=reset,
             last_known_usage=usage,
@@ -137,11 +140,19 @@ class StateStore:
                 if isinstance(document.get("last_window_keeper_error"), str)
                 else None
             ),
+            last_window_keeper_verified_at=_parse_time(
+                document.get("last_window_keeper_verified_at")
+            ),
+            window_keeper_failures=(
+                max(0, document["window_keeper_failures"])
+                if type(document.get("window_keeper_failures")) is int else 0
+            ),
         )
 
     def save(self, state: AppState) -> None:
         document: dict[str, Any] = {
             "version": _STATE_VERSION,
+            "selected_provider": state.selected_provider,
             "last_seen_reset_id": state.last_seen_reset_id,
             "last_global_reset": None,
             "last_known_usage": None,
@@ -159,6 +170,10 @@ class StateStore:
                 state.last_window_keeper_success_at
             ),
             "last_window_keeper_error": state.last_window_keeper_error,
+            "last_window_keeper_verified_at": _format_time(
+                state.last_window_keeper_verified_at
+            ),
+            "window_keeper_failures": state.window_keeper_failures,
         }
         if state.last_global_reset is not None:
             event = state.last_global_reset

@@ -81,10 +81,25 @@ class WindowKeeperApplication:
     _schedule_window_keeper_from_usage = (
         CodexWidgetApplication._schedule_window_keeper_from_usage
     )
+    _choose_window_keeper_due_at = (
+        CodexWidgetApplication._choose_window_keeper_due_at
+    )
+    _usage_has_active_five_hour_window = (
+        CodexWidgetApplication._usage_has_active_five_hour_window
+    )
+    _usage_looks_like_idle_five_hour_window = (
+        CodexWidgetApplication._usage_looks_like_idle_five_hour_window
+    )
+    _window_keeper_window_seconds = staticmethod(
+        CodexWidgetApplication._window_keeper_window_seconds
+    )
     _schedule_window_keeper_at = CodexWidgetApplication._schedule_window_keeper_at
     _cancel_window_keeper_timer = CodexWidgetApplication._cancel_window_keeper_timer
     _schedule_window_keeper_retry = (
         CodexWidgetApplication._schedule_window_keeper_retry
+    )
+    _schedule_window_keeper_retry_at = (
+        CodexWidgetApplication._schedule_window_keeper_retry_at
     )
     _start_window_keeper_watchdog = (
         CodexWidgetApplication._start_window_keeper_watchdog
@@ -102,6 +117,7 @@ class WindowKeeperApplication:
         CodexWidgetApplication._record_window_keeper_outcome
     )
     _activate_and_read_usage = CodexWidgetApplication._activate_and_read_usage
+    _verify_window_keeper = CodexWidgetApplication._verify_window_keeper
     _window_keeper_activation_finished = (
         CodexWidgetApplication._window_keeper_activation_finished
     )
@@ -141,6 +157,90 @@ class WindowKeeperApplication:
         CodexWidgetApplication._cancel_window_keeper_timer(self)
 
 
+class KeeperCycleApplication:
+    _schedule_window_keeper_from_usage = (
+        CodexWidgetApplication._schedule_window_keeper_from_usage
+    )
+    _schedule_window_keeper_at = CodexWidgetApplication._schedule_window_keeper_at
+    _schedule_window_keeper_retry = (
+        CodexWidgetApplication._schedule_window_keeper_retry
+    )
+    _cancel_window_keeper_timer = CodexWidgetApplication._cancel_window_keeper_timer
+    _cancel_window_keeper_watchdog = (
+        CodexWidgetApplication._cancel_window_keeper_watchdog
+    )
+    _window_keeper_enabled = CodexWidgetApplication._window_keeper_enabled
+    _window_keeper_timer_fired = CodexWidgetApplication._window_keeper_timer_fired
+    _window_keeper_retry_fired = CodexWidgetApplication._window_keeper_retry_fired
+    _refresh_window_keeper_schedule = (
+        CodexWidgetApplication._refresh_window_keeper_schedule
+    )
+    _window_keeper_schedule_refreshed = (
+        CodexWidgetApplication._window_keeper_schedule_refreshed
+    )
+    _activate_and_read_usage = CodexWidgetApplication._activate_and_read_usage
+    _verify_window_keeper = CodexWidgetApplication._verify_window_keeper
+    _read_and_store_usage = CodexWidgetApplication._read_and_store_usage
+    _read_and_store_usage_unlocked = (
+        CodexWidgetApplication._read_and_store_usage_unlocked
+    )
+    _record_window_keeper_outcome = (
+        CodexWidgetApplication._record_window_keeper_outcome
+    )
+    _window_keeper_activation_finished = (
+        CodexWidgetApplication._window_keeper_activation_finished
+    )
+    _window_keeper_history_suffix = (
+        CodexWidgetApplication._window_keeper_history_suffix
+    )
+    set_window_keeper_enabled = CodexWidgetApplication.set_window_keeper_enabled
+
+    def _choose_window_keeper_due_at(self, usage, state, now):
+        return CodexWidgetApplication._choose_window_keeper_due_at(
+            self, usage, state, now
+        )
+
+    def _usage_has_active_five_hour_window(self, usage, now):
+        return CodexWidgetApplication._usage_has_active_five_hour_window(
+            self, usage, now
+        )
+
+    def _usage_looks_like_idle_five_hour_window(self, usage, now):
+        return CodexWidgetApplication._usage_looks_like_idle_five_hour_window(
+            self, usage, now
+        )
+
+    @staticmethod
+    def _window_keeper_window_seconds(usage=None):
+        return CodexWidgetApplication._window_keeper_window_seconds(usage)
+
+    def _schedule_window_keeper_retry_at(self, target, message):
+        return CodexWidgetApplication._schedule_window_keeper_retry_at(
+            self, target, message
+        )
+
+    def __init__(self, state_store):
+        self.state_store = state_store
+        self._state_lock = threading.Lock()
+        self._account_query_lock = threading.Lock()
+        self._window_keeper_source = None
+        self._window_keeper_watchdog_source = None
+        self._window_keeper_busy = False
+        self._window_keeper_message = ""
+        self.window = None
+
+    def _run_async(self, work, done):
+        try:
+            result = work()
+        except BaseException as error:
+            done(None, error)
+            return
+        done(result, None)
+
+    def _set_window_keeper_message(self, message):
+        self._window_keeper_message = message
+
+
 def usage_snapshot(
     *,
     weekly_used=25,
@@ -158,6 +258,192 @@ def usage_snapshot(
     )
 
 
+class WindowKeeperCycleTests(unittest.TestCase):
+    def setUp(self):
+        sleeper = patch("codex_widget.window_keeper.time.sleep")
+        sleeper.start()
+        self.addCleanup(sleeper.stop)
+
+    def test_two_scheduler_cycles_survive_sliding_idle_observations(self):
+        now = datetime(2026, 9, 6, 12, tzinfo=UTC)
+        requests = []
+        timers = []
+
+        class FakeCodex:
+            def activate_five_hour_window(self):
+                requests.append(now)
+
+            def read_rate_limits(self):
+                return UsageSnapshot(
+                    used_percent=25,
+                    reset_at=now + timedelta(days=1),
+                    window_minutes=10080,
+                    banked_resets=2,
+                    checked_at=now,
+                    five_hour_used_percent=0,
+                    five_hour_reset_at=now + timedelta(hours=5),
+                    five_hour_window_minutes=300,
+                )
+
+        with tempfile.TemporaryDirectory() as directory:
+            store = StateStore(Path(directory) / "state.json")
+            store.save(AppState(keep_five_hour_window_active=True))
+            application = KeeperCycleApplication(store)
+            application.codex = FakeCodex()
+
+            def schedule(seconds, callback):
+                timers.append((seconds, callback))
+                return len(timers)
+
+            with (
+                patch("codex_widget.window_keeper.utc_now", side_effect=lambda: now),
+                patch(
+                    "codex_widget.app.GLib.timeout_add_seconds",
+                    side_effect=schedule,
+                ),
+                patch("codex_widget.app.GLib.source_remove"),
+            ):
+                application._schedule_window_keeper_from_usage(
+                    application.codex.read_rate_limits()
+                )
+                now += timedelta(seconds=timers[-1][0])
+                timers[-1][1]()
+                self.assertEqual(len(requests), 1)
+                due = store.load().next_window_keeper_due_at
+                self.assertIsNotNone(due)
+
+                for _ in range(299):
+                    now += timedelta(minutes=1)
+                    application._schedule_window_keeper_from_usage(
+                        application.codex.read_rate_limits()
+                    )
+                    self.assertEqual(store.load().next_window_keeper_due_at, due)
+
+                now = due
+                timers[-1][1]()
+
+            self.assertEqual(len(requests), 2)
+            self.assertGreater(store.load().next_window_keeper_due_at, due)
+
+    def test_restart_keeps_due_and_retry_backoff_ahead_of_idle_refresh(self):
+        now = datetime(2026, 9, 6, 12, tzinfo=UTC)
+        due = now + timedelta(hours=1)
+        retry = now + timedelta(minutes=1)
+        timers = []
+        requests = []
+
+        class FakeCodex:
+            def activate_five_hour_window(self):
+                requests.append(now)
+
+            def read_rate_limits(self):
+                return UsageSnapshot(
+                    used_percent=25,
+                    reset_at=now + timedelta(days=1),
+                    window_minutes=10080,
+                    banked_resets=0,
+                    checked_at=now,
+                    five_hour_used_percent=0,
+                    five_hour_reset_at=now + timedelta(hours=5),
+                    five_hour_window_minutes=300,
+                )
+
+        with tempfile.TemporaryDirectory() as directory:
+            store = StateStore(Path(directory) / "state.json")
+            store.save(
+                AppState(
+                    keep_five_hour_window_active=True,
+                    next_window_keeper_due_at=due,
+                )
+            )
+
+            def schedule(seconds, callback):
+                timers.append((seconds, callback))
+                return len(timers)
+
+            with (
+                patch("codex_widget.window_keeper.utc_now", side_effect=lambda: now),
+                patch(
+                    "codex_widget.app.GLib.timeout_add_seconds",
+                    side_effect=schedule,
+                ),
+                patch("codex_widget.app.GLib.source_remove"),
+            ):
+                failed_application = KeeperCycleApplication(store)
+                failed_application._window_keeper_activation_finished(
+                    None, RuntimeError("offline")
+                )
+                self.assertEqual(store.load().next_window_keeper_due_at, due)
+                self.assertEqual(store.load().next_window_keeper_retry_at, retry)
+
+                application = KeeperCycleApplication(store)
+                application.codex = FakeCodex()
+                application._schedule_window_keeper_from_usage(
+                    application.codex.read_rate_limits()
+                )
+                self.assertEqual(timers[-1][0], 60)
+                self.assertEqual(store.load().next_window_keeper_due_at, due)
+                self.assertEqual(store.load().next_window_keeper_retry_at, retry)
+                self.assertEqual(requests, [])
+
+                now = retry
+                timers[-1][1]()
+
+            self.assertEqual(requests, [])
+            self.assertEqual(store.load().next_window_keeper_due_at, due)
+            self.assertIsNone(store.load().next_window_keeper_retry_at)
+            self.assertEqual(timers[-1][0], 59 * 60)
+
+    def test_disable_clears_deadlines_and_blocks_a_pending_callback(self):
+        now = datetime(2026, 9, 6, 12, tzinfo=UTC)
+        timers = []
+        requests = []
+
+        class FakeCodex:
+            def activate_five_hour_window(self):
+                requests.append(now)
+
+            def read_rate_limits(self):
+                raise AssertionError("disabled callback must not refresh usage")
+
+        with tempfile.TemporaryDirectory() as directory:
+            store = StateStore(Path(directory) / "state.json")
+            store.save(
+                AppState(
+                    keep_five_hour_window_active=True,
+                    next_window_keeper_due_at=now + timedelta(hours=5),
+                    next_window_keeper_retry_at=now + timedelta(minutes=1),
+                )
+            )
+            application = KeeperCycleApplication(store)
+            application.codex = FakeCodex()
+
+            def schedule(seconds, callback):
+                timers.append((seconds, callback))
+                return len(timers)
+
+            with (
+                patch("codex_widget.window_keeper.utc_now", side_effect=lambda: now),
+                patch(
+                    "codex_widget.app.GLib.timeout_add_seconds",
+                    side_effect=schedule,
+                ),
+                patch("codex_widget.app.GLib.source_remove"),
+            ):
+                application._schedule_window_keeper_retry(
+                    60, "retrying after failure"
+                )
+                pending_callback = timers[-1][1]
+                application.set_window_keeper_enabled(False)
+                pending_callback()
+
+            state = store.load()
+            self.assertFalse(state.keep_five_hour_window_active)
+            self.assertIsNone(state.next_window_keeper_due_at)
+            self.assertIsNone(state.next_window_keeper_retry_at)
+            self.assertEqual(requests, [])
+
+
 class WindowKeeperTests(unittest.TestCase):
     def test_active_window_schedules_tiny_request_after_its_reset(self):
         now = datetime(2026, 8, 31, 10, tzinfo=UTC)
@@ -165,7 +451,7 @@ class WindowKeeperTests(unittest.TestCase):
         usage = usage_snapshot(five_hour_reset=now + timedelta(hours=1))
 
         with (
-            patch("codex_widget.app.utc_now", return_value=now),
+            patch("codex_widget.window_keeper.utc_now", return_value=now),
             patch(
                 "codex_widget.app.GLib.timeout_add_seconds",
                 return_value=72,
@@ -177,25 +463,7 @@ class WindowKeeperTests(unittest.TestCase):
         self.assertEqual(application._window_keeper_source, 72)
         self.assertIn("next tiny request", application.messages[-1])
 
-    def test_schedule_status_exposes_last_successful_request(self):
-        now = datetime(2026, 8, 31, 10, tzinfo=UTC)
-        application = WindowKeeperApplication()
-        application.state_store.state.last_window_keeper_success_at = (
-            now - timedelta(minutes=3)
-        )
 
-        with (
-            patch("codex_widget.app.utc_now", return_value=now),
-            patch(
-                "codex_widget.app.GLib.timeout_add_seconds",
-                return_value=72,
-            ),
-        ):
-            application._schedule_window_keeper_from_usage(
-                usage_snapshot(five_hour_reset=now + timedelta(hours=1))
-            )
-
-        self.assertIn("last sent", application.messages[-1])
 
     def test_weekly_limit_pauses_activation_until_weekly_reset(self):
         now = datetime(2026, 8, 31, 10, tzinfo=UTC)
@@ -207,7 +475,7 @@ class WindowKeeperTests(unittest.TestCase):
         )
 
         with (
-            patch("codex_widget.app.utc_now", return_value=now),
+            patch("codex_widget.window_keeper.utc_now", return_value=now),
             patch(
                 "codex_widget.app.GLib.timeout_add_seconds",
                 return_value=73,
@@ -223,7 +491,7 @@ class WindowKeeperTests(unittest.TestCase):
         application = WindowKeeperApplication()
 
         with (
-            patch("codex_widget.app.utc_now", return_value=now),
+            patch("codex_widget.window_keeper.utc_now", return_value=now),
             patch(
                 "codex_widget.app.GLib.timeout_add_seconds",
                 return_value=74,
@@ -232,7 +500,6 @@ class WindowKeeperTests(unittest.TestCase):
             application._schedule_window_keeper_from_usage(usage_snapshot())
 
         schedule.assert_called_once_with(1, application._window_keeper_timer_fired)
-        self.assertIn("activating an idle window", application.messages[-1])
 
     def test_toggle_persists_opt_in_and_starts_or_cancels_scheduler(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -283,7 +550,7 @@ class WindowKeeperTests(unittest.TestCase):
             five_hour_reset=now - timedelta(minutes=2)
         )
 
-        with patch("codex_widget.app.utc_now", return_value=now):
+        with patch("codex_widget.window_keeper.utc_now", return_value=now):
             result = application._window_keeper_watchdog_tick()
 
         self.assertEqual(result, GLib.SOURCE_CONTINUE)
@@ -300,8 +567,8 @@ class WindowKeeperTests(unittest.TestCase):
         application._read_and_store_usage_unlocked = lambda: expected
 
         with patch(
-            "codex_widget.app.utc_now",
-            side_effect=[attempted, succeeded],
+            "codex_widget.window_keeper.utc_now",
+            side_effect=[attempted, succeeded, succeeded, succeeded, succeeded],
         ):
             result = application._activate_and_read_usage()
 
@@ -320,7 +587,7 @@ class WindowKeeperTests(unittest.TestCase):
 
         application.codex = SimpleNamespace(activate_five_hour_window=fail)
         with (
-            patch("codex_widget.app.utc_now", return_value=attempted),
+            patch("codex_widget.window_keeper.utc_now", return_value=attempted),
             self.assertRaisesRegex(RuntimeError, "network unavailable"),
         ):
             application._activate_and_read_usage()

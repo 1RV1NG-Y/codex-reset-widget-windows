@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import itertools
 import json
 import math
 import os
@@ -10,6 +11,7 @@ import sys
 import threading
 import time
 import queue
+import webbrowser
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -26,21 +28,22 @@ try:
 except ImportError:  # pragma: no cover - non-Windows import compatibility.
     winsound = None  # type: ignore[assignment]
 
+from . import window_keeper
+from .claude_client import USAGE_PAGE, ClaudeClient, detect_claude
 from .codex_client import CodexClient, CodexClientError
 from .models import ResetEvent, UsageSnapshot, utc_now
 from .state import StateStore
 from .tracker import TrackerClient, TrackerError
 from .watcher import PollOutcome, ResetWatcher, account_reset_observed
+from .window_keeper import ClaudeWindowKeeper, WindowKeeperMixin
 
 _DEFAULT_POLL_SECONDS = 60
 _USAGE_REFRESH_SECONDS = 60
 _RESET_NOTIFICATION_MAX_AGE = timedelta(hours=6)
-_WINDOW_KEEPER_GRACE_SECONDS = 10
-_WINDOW_KEEPER_RETRY_SECONDS = 60
-_WINDOW_KEEPER_PROPAGATION_SECONDS = 60
-_WINDOW_KEEPER_WATCHDOG_SECONDS = 60
-_WINDOW_KEEPER_DEFAULT_WINDOW_SECONDS = 5 * 60 * 60
-_WINDOW_KEEPER_IDLE_RESET_TOLERANCE_SECONDS = 120
+_CLAUDE_POLL_SECONDS = 300
+_DISMISS_SETTLE_SECONDS = 0.6
+_CODEX_ACCENT = "#60a5fa"
+_CLAUDE_ACCENT = "#fb923c"
 _USAGE_TEXT = (
     "Usage: codex-widget [--daemon | --demo-reset | --quit]\n"
     "Without options, show the widget and keep its reset watcher resident.\n"
@@ -546,7 +549,7 @@ if os.name == "nt":
                 if command_id == _ID_OPEN:
                     self.application.call_soon(self.application.show_widget)
                 elif command_id == _ID_CHECK:
-                    self.application.call_soon(self.application._poll_tick)
+                    self.application.call_soon(self.application._check_now)
                 elif command_id == _ID_QUIT:
                     self.application.call_soon(self.application.quit)
                 return 0
@@ -570,7 +573,7 @@ if os.name == "nt":
             if not menu:
                 return
             _user32.AppendMenuW(menu, _MF_STRING, _ID_OPEN, "Open Codex Widget")
-            _user32.AppendMenuW(menu, _MF_STRING, _ID_CHECK, "Check for resets now")
+            _user32.AppendMenuW(menu, _MF_STRING, _ID_CHECK, "Check usage and resets now")
             _user32.AppendMenuW(menu, _MF_SEPARATOR, 0, None)
             _user32.AppendMenuW(menu, _MF_STRING, _ID_QUIT, "Quit Codex Widget")
             self._menu = int(menu)
@@ -666,6 +669,44 @@ class _SingleInstanceLock:
         self.acquired = False
 
 
+class _TkMainLoop:
+    """The GLib subset WindowKeeperMixin uses, backed by the Tk event loop."""
+
+    SOURCE_REMOVE = False
+    SOURCE_CONTINUE = True
+
+    def __init__(self, application: CodexWidgetApplication) -> None:
+        self._application = application
+        self._sources: dict[int, str | None] = {}
+        self._ids = itertools.count(1)
+
+    def timeout_add_seconds(
+        self, seconds: int | float, callback: Callable[..., Any], *args: Any
+    ) -> int:
+        source = next(self._ids)
+
+        def fire() -> None:
+            if source not in self._sources:
+                return
+            self._sources[source] = None
+            # Like GLib, a callback that returns True runs again unless removed.
+            if callback(*args) and source in self._sources:
+                self._sources[source] = self._application._after_seconds(seconds, fire)
+            else:
+                self._sources.pop(source, None)
+
+        self._sources[source] = self._application._after_seconds(seconds, fire)
+        return source
+
+    def source_remove(self, source: int) -> None:
+        if source in self._sources:
+            self._application._cancel_source(self._sources.pop(source))
+
+    def idle_add(self, callback: Callable[..., Any], *args: Any) -> int:
+        self._application.call_soon(callback, *args)
+        return 0
+
+
 class _TextHandle:
     def __init__(
         self,
@@ -704,8 +745,13 @@ class _ProgressHandle:
             highlightthickness=0,
             bd=0,
         )
-        self._fill = self.widget.create_rectangle(0, 0, 0, 8, fill="#60a5fa", outline="")
+        self._fill = self.widget.create_rectangle(
+            0, 0, 0, 8, fill=_CODEX_ACCENT, outline=""
+        )
         self.widget.bind("<Configure>", self._redraw)
+
+    def set_color(self, color: str) -> None:
+        self.widget.itemconfigure(self._fill, fill=color)
 
     def set_fraction(self, fraction: float) -> None:
         self._fraction = max(0.0, min(1.0, fraction))
@@ -816,6 +862,11 @@ class _ToggleButton:
     def set_label(self, label: str) -> None:
         self.widget.configure(text=label)
 
+    def set_accent(self, active_bg: str, highlight: str) -> None:
+        self._active_bg = active_bg
+        self.widget.configure(highlightcolor=highlight)
+        self.set_active(self._active)
+
     def set_tooltip_text(self, tooltip: str) -> None:
         self._tooltip.set_text(tooltip)
 
@@ -864,10 +915,17 @@ class WidgetWindow:
         except tk.TclError:
             pass
 
+        self._window.bind("<FocusIn>", self._on_focus_in)
+
         self._dragging = False
         self._drag_origin = (0, 0)
         self._pointer_origin = (0, 0)
         self._keeper_syncing = False
+        self._hide_source: str | None = None
+        self._focused_since_open = False
+        self._dismiss_after = 0.0
+        self._can_switch_provider = False
+        self.provider_name = "codex"
 
         card = tk.Frame(self._window, bg="#111318", padx=20, pady=18)
         card.pack(fill="both", expand=True)
@@ -876,22 +934,29 @@ class WidgetWindow:
         header.pack(fill="x", pady=(0, 10))
         header_text = tk.Frame(header, bg="#111318")
         header_text.pack(side="left", fill="x", expand=True)
-        dot = tk.Label(
-            header_text,
+        self.provider_button = tk.Frame(header_text, bg="#111318")
+        self.provider_button.pack(side="left")
+        self.dot = tk.Label(
+            self.provider_button,
             text="●",
             bg="#111318",
-            fg="#60a5fa",
+            fg=_CODEX_ACCENT,
             font=("Segoe UI", 10, "bold"),
         )
-        dot.pack(side="left", padx=(0, 7))
-        brand = tk.Label(
-            header_text,
+        self.dot.pack(side="left", padx=(0, 7))
+        self.brand = tk.Label(
+            self.provider_button,
             text="CODEX",
             bg="#111318",
             fg="#f4f5f7",
             font=("Segoe UI", 10, "bold"),
         )
-        brand.pack(side="left")
+        self.brand.pack(side="left")
+        self._provider_tooltip = _Tooltip(self.provider_button, "")
+        for widget in (self.provider_button, self.dot, self.brand):
+            widget.bind("<ButtonRelease-1>", self._on_provider_clicked)
+            widget.bind("<Enter>", self._on_provider_hover, add="+")
+            widget.bind("<Leave>", self._on_provider_leave, add="+")
         hint = tk.Label(
             header_text,
             text="DRAG ANYWHERE",
@@ -918,11 +983,33 @@ class WidgetWindow:
         self.progress.widget.pack(fill="x", pady=(0, 9))
 
         reset_row, self.reset_value = _row(card, "Weekly resets in")
-        banked_row, self.banked_value = _row(card, "Banked resets")
-        global_row, self.global_value = _row(card, "🙏 Last Tibo reset")
+        self.banked_row, self.banked_value = _row(card, "Banked resets")
+        self.global_row, self.global_value = _row(card, "🙏 Last Tibo reset")
+        self.global_label = self.global_row.winfo_children()[0]
         reset_row.pack(fill="x", pady=(0, 6))
-        banked_row.pack(fill="x", pady=(0, 6))
-        global_row.pack(fill="x", pady=(0, 12))
+        self.banked_row.pack(fill="x", pady=(0, 6))
+        self.reset_offers_button = tk.Label(
+            card,
+            text="Limit resets · Open Claude Usage ↗",
+            bg="#111318",
+            fg="#aeb4bf",
+            font=("Segoe UI", 9),
+            anchor="w",
+            cursor="hand2",
+        )
+        self.reset_offers_button.bind("<ButtonRelease-1>", self._on_reset_offers_clicked)
+        self.reset_offers_button.bind(
+            "<Enter>", lambda _event: self.reset_offers_button.configure(fg=_CLAUDE_ACCENT)
+        )
+        self.reset_offers_button.bind(
+            "<Leave>", lambda _event: self.reset_offers_button.configure(fg="#aeb4bf")
+        )
+        _Tooltip(
+            self.reset_offers_button,
+            "Claude's usage API does not expose reset offers. "
+            "View available resets and their expiry in Claude.",
+        )
+        self.global_row.pack(fill="x", pady=(0, 12))
 
         self.keeper_button = _ToggleButton(
             card,
@@ -955,18 +1042,79 @@ class WidgetWindow:
         )
         self.status.widget.pack(fill="x")
 
-        self._drag_exclusions = {self.pin_button.widget, self.keeper_button.widget}
+        self._drag_exclusions = {
+            self.pin_button.widget,
+            self.keeper_button.widget,
+            self.provider_button,
+            self.reset_offers_button,
+        }
         self._bind_drag(card)
+
+    def set_provider(self, name: str, can_switch: bool) -> None:
+        self.provider_name = name
+        self._can_switch_provider = can_switch
+        claude = name == "claude"
+        accent = _CLAUDE_ACCENT if claude else _CODEX_ACCENT
+        self._window.title("Claude Widget" if claude else "Codex Widget")
+        self.brand.configure(text=name.upper(), fg="#f4f5f7")
+        self.dot.configure(fg=accent)
+        cursor = "hand2" if can_switch else ""
+        for widget in (self.provider_button, self.dot, self.brand):
+            widget.configure(cursor=cursor)
+        self._provider_tooltip.set_text(
+            f"Switch to {'Codex' if claude else 'Claude'}" if can_switch else "Codex"
+        )
+        self.progress.set_color(accent)
+        self.five_hour_progress.set_color(accent)
+        self.pin_button.set_accent("#c45f32" if claude else "#2563eb", accent)
+        self.keeper_button.set_accent("#5b301e" if claude else "#163a66", accent)
+        if claude:
+            self.banked_row.pack_forget()
+            self.reset_offers_button.pack(fill="x", pady=(0, 6), before=self.global_row)
+        else:
+            self.reset_offers_button.pack_forget()
+            self.banked_row.pack(fill="x", pady=(0, 6), before=self.global_row)
+        self.global_label.configure(
+            text="Last account reset" if claude else "🙏 Last Tibo reset"
+        )
+        self.keeper_button.set_tooltip_text(
+            f"Uses one tiny {name.title()} request after each five-hour reset"
+        )
+
+    def _on_provider_clicked(self, _event: Any) -> str:
+        if self._can_switch_provider:
+            self.application.toggle_provider()
+        return "break"
+
+    def _on_provider_hover(self, _event: Any) -> None:
+        if self._can_switch_provider:
+            self.brand.configure(
+                fg=_CLAUDE_ACCENT if self.provider_name == "claude" else _CODEX_ACCENT
+            )
+
+    def _on_provider_leave(self, _event: Any) -> None:
+        self.brand.configure(fg="#f4f5f7")
+
+    def _on_reset_offers_clicked(self, _event: Any) -> str:
+        webbrowser.open(USAGE_PAGE)
+        return "break"
 
     def show_loading(self, last_reset: ResetEvent | None) -> None:
         self.usage_value.set_text("Checking…")
+        self.progress.set_fraction(0)
         self.five_hour_value.set_text("Checking…")
         self.five_hour_progress.set_fraction(0)
         self.five_hour_reset_value.set_text("—")
         self.reset_value.set_text("—")
         self.banked_value.set_text("—")
         self._set_last_reset(last_reset)
-        self.status.set_text("Reading your Codex account")
+        self.status.set_text(f"Reading your {self.provider_name.title()} account")
+
+    def present_widget(self) -> None:
+        self._cancel_pending_hide()
+        self._focused_since_open = self._has_focus()
+        # Let the tray/launcher finish its focus transition before dismissing.
+        self._dismiss_after = time.monotonic() + _DISMISS_SETTLE_SECONDS
         self.show_all()
         self.present()
 
@@ -998,10 +1146,7 @@ class WidgetWindow:
         self.status.set_text(
             f"Updated {_relative_time(usage.checked_at)} ago · auto-refreshes every 60s"
         )
-        was_visible = self.get_visible()
-        self.show_all()
-        if not was_visible:
-            self.present()
+        self._fit_to_content()
 
     def show_error(self, message: str, last_reset: ResetEvent | None) -> None:
         self.usage_value.set_text("Unavailable")
@@ -1013,10 +1158,7 @@ class WidgetWindow:
         self.banked_value.set_text("—")
         self._set_last_reset(last_reset)
         self.status.set_text(message)
-        was_visible = self.get_visible()
-        self.show_all()
-        if not was_visible:
-            self.present()
+        self._fit_to_content()
 
     def set_window_keeper_state(self, enabled: bool, message: str) -> None:
         self._keeper_syncing = True
@@ -1029,6 +1171,14 @@ class WidgetWindow:
 
     def get_visible(self) -> bool:
         return self._window.state() != "withdrawn"
+
+    def _fit_to_content(self) -> None:
+        if self.get_visible():
+            self._window.update_idletasks()
+            width = max(340, self._window.winfo_reqwidth())
+            height = max(1, self._window.winfo_reqheight())
+            x, y = self._window.winfo_x(), self._window.winfo_y()
+            self._window.geometry(f"{width}x{height}+{x}+{y}")
 
     def show_all(self) -> None:
         self._window.deiconify()
@@ -1120,6 +1270,7 @@ class WidgetWindow:
         pinned = button.get_active()
         self._window.attributes("-topmost", pinned)
         if pinned:
+            self._cancel_pending_hide()
             button.set_label("PINNED")
             button.set_tooltip_text("Unpin to restore click-outside dismissal")
             self.present()
@@ -1128,6 +1279,7 @@ class WidgetWindow:
             button.set_tooltip_text("Keep the widget above other windows")
 
     def _dismiss(self) -> None:
+        self._cancel_pending_hide()
         self.pin_button.set_active(False)
         self._on_pin_toggled(self.pin_button)
         self.hide()
@@ -1137,10 +1289,37 @@ class WidgetWindow:
         return "break"
 
     def _on_focus_out(self, _event: Any) -> None:
-        if not self.pin_button.get_active() and not self._dragging:
-            self._window.after(120, self._hide_if_inactive)
+        if (
+            self._focused_since_open
+            and self.get_visible()
+            and not self.pin_button.get_active()
+            and not self._dragging
+        ):
+            self._cancel_pending_hide()
+            delay = max(120, int((self._dismiss_after - time.monotonic()) * 1000) + 1)
+            self._hide_source = self._window.after(delay, self._hide_if_inactive)
+
+    def _on_focus_in(self, _event: Any) -> None:
+        self._focused_since_open = True
+        self._cancel_pending_hide()
+
+    def _cancel_pending_hide(self) -> None:
+        if self._hide_source is not None:
+            try:
+                self._window.after_cancel(self._hide_source)
+            except tk.TclError:
+                pass
+            self._hide_source = None
+
+    def _has_focus(self) -> bool:
+        try:
+            focus = self._window.focus_get()
+        except (KeyError, tk.TclError):
+            return False
+        return focus is not None and self._is_descendant(focus)
 
     def _hide_if_inactive(self) -> None:
+        self._hide_source = None
         if self.pin_button.get_active() or self._dragging:
             return
         focus = self._window.focus_get()
@@ -1156,11 +1335,24 @@ class WidgetWindow:
         return False
 
 
-class CodexWidgetApplication:
+class CodexWidgetApplication(WindowKeeperMixin):
     def __init__(self) -> None:
+        if window_keeper.GLib is None or isinstance(window_keeper.GLib, _TkMainLoop):
+            window_keeper.GLib = _TkMainLoop(self)
         self.window: WidgetWindow | None = None
         self.state_store = StateStore()
         self.codex = CodexClient()
+        self.claude_executable = detect_claude()
+        self.selected_provider = self.state_store.load().selected_provider
+        if not self.claude_executable:
+            self.selected_provider = "codex"
+        self.claude_keeper = ClaudeWindowKeeper(
+            self,
+            ClaudeClient(self.claude_executable or "claude"),
+            StateStore(self.state_store.path.with_name("claude-state.json")),
+        )
+        self._claude_refreshing = False
+        self._claude_poll_source: str | None = None
         self.watcher = ResetWatcher(TrackerClient(), self.state_store)
         self._resident = False
         self._polling = False
@@ -1169,8 +1361,8 @@ class CodexWidgetApplication:
         self._notification_ids: dict[str, int] = {}
         self._usage_refresh_source: str | None = None
         self._usage_refreshing = False
-        self._window_keeper_source: str | None = None
-        self._window_keeper_watchdog_source: str | None = None
+        self._window_keeper_source: int | None = None
+        self._window_keeper_watchdog_source: int | None = None
         self._window_keeper_busy = False
         self._window_keeper_message = "Automatic 5-hour rolling is off"
         self._poll_source: str | None = None
@@ -1246,7 +1438,7 @@ class CodexWidgetApplication:
         if command == "show":
             self.call_soon(self.show_widget)
         elif command == "check":
-            self.call_soon(self._poll_tick)
+            self.call_soon(self._check_now)
         elif command == "demo-reset":
             self.call_soon(self.show_reset_demo)
         elif command == "daemon":
@@ -1285,18 +1477,19 @@ class CodexWidgetApplication:
         if self._quitting:
             return
         self._quitting = True
+        for keeper in (self, self.claude_keeper):
+            keeper._cancel_window_keeper_timer()
+            keeper._cancel_window_keeper_watchdog()
         for source in (
             self._poll_source,
             self._usage_refresh_source,
-            self._window_keeper_source,
-            self._window_keeper_watchdog_source,
+            self._claude_poll_source,
             self._dispatch_source,
         ):
             self._cancel_source(source)
         self._poll_source = None
         self._usage_refresh_source = None
-        self._window_keeper_source = None
-        self._window_keeper_watchdog_source = None
+        self._claude_poll_source = None
         self._dispatch_source = None
         if self._command_server is not None:
             self._command_server.stop()
@@ -1323,14 +1516,24 @@ class CodexWidgetApplication:
 
     def show_widget(self) -> None:
         self._ensure_tk_root()
+        # Recheck on open so installing Claude does not require a restart.
+        self.claude_executable = detect_claude()
+        if self.claude_executable:
+            self.claude_keeper.codex.executable = self.claude_executable
+            self._start_claude_polling()
+        else:
+            self.selected_provider = "codex"
         if self.window is None:
             self.window = WidgetWindow(self, self._root)
-        state = self.state_store.load()
+        self.window.set_provider(self.selected_provider, self.claude_executable is not None)
+        keeper = self.claude_keeper if self.selected_provider == "claude" else self
+        state = keeper.state_store.load()
         self.window.set_window_keeper_state(
             state.keep_five_hour_window_active,
-            self._window_keeper_message,
+            keeper._window_keeper_message,
         )
         self.window.show_loading(state.last_global_reset)
+        self.window.present_widget()
         self._start_usage_refresh()
 
     def show_reset_demo(self) -> None:
@@ -1386,6 +1589,9 @@ class CodexWidgetApplication:
             self._start_window_keeper_watchdog()
             self._set_window_keeper_message("Checking the 5-hour window…")
             self._refresh_window_keeper_schedule()
+        if self.claude_executable:
+            self.claude_keeper.start()
+            self._start_claude_polling()
 
     @staticmethod
     def _poll_interval() -> int:
@@ -1414,6 +1620,10 @@ class CodexWidgetApplication:
             self._polling = True
             self._run_async(self._poll_once, self._poll_finished)
 
+    def _check_now(self) -> None:
+        self._poll_tick()
+        self._refresh_visible_usage()
+
     def _poll_once(self) -> tuple[PollOutcome, ResetEvent, UsageSnapshot | None]:
         with self._state_lock:
             outcome, event, state = self.watcher.poll_once()
@@ -1426,7 +1636,11 @@ class CodexWidgetApplication:
     ) -> None:
         self._polling = False
         if error is not None:
-            if self.window is not None and self.window.get_visible():
+            if (
+                self.window is not None
+                and self.window.get_visible()
+                and self.selected_provider == "codex"
+            ):
                 self.window.status.set_text(f"Reset tracker unavailable: {error}")
             return
         if result is None:
@@ -1438,6 +1652,7 @@ class CodexWidgetApplication:
             if (
                 self.window is not None
                 and self.window.get_visible()
+                and self.selected_provider == "codex"
                 and previous_usage is not None
             ):
                 self.window.show_usage(previous_usage, event)
@@ -1473,6 +1688,10 @@ class CodexWidgetApplication:
         )
 
     def _refresh_visible_usage(self) -> None:
+        if self.selected_provider == "claude":
+            if self.window is not None and self.window.get_visible():
+                self._refresh_claude_usage()
+            return
         if (
             self._usage_refreshing
             or self.window is None
@@ -1487,399 +1706,90 @@ class CodexWidgetApplication:
             self._cancel_source(self._usage_refresh_source)
             self._usage_refresh_source = None
 
-    def _read_and_store_usage(self) -> UsageSnapshot:
-        with self._account_query_lock:
-            return self._read_and_store_usage_unlocked()
-
-    def _read_and_store_usage_unlocked(self) -> UsageSnapshot:
-        usage = self.codex.read_rate_limits()
-        with self._state_lock:
-            state = self.state_store.load()
-            state.last_known_usage = usage
-            self.state_store.save(state)
-        return usage
-
     def set_window_keeper_enabled(self, enabled: bool) -> None:
-        with self._state_lock:
-            state = self.state_store.load()
-            state.keep_five_hour_window_active = enabled
-            if not enabled:
-                state.next_window_keeper_due_at = None
-                state.next_window_keeper_retry_at = None
-            self.state_store.save(state)
-        if enabled:
-            self._start_window_keeper_watchdog()
-            self._set_window_keeper_message("Checking the 5-hour window…")
-            self._refresh_window_keeper_schedule()
+        if self.selected_provider == "claude":
+            self.claude_keeper.set_window_keeper_enabled(enabled)
         else:
-            self._cancel_window_keeper_timer()
-            self._cancel_window_keeper_watchdog()
-            self._set_window_keeper_message("Automatic 5-hour rolling is off")
+            WindowKeeperMixin.set_window_keeper_enabled(self, enabled)
 
-    def _window_keeper_enabled(self) -> bool:
+    def toggle_provider(self) -> None:
+        if not detect_claude():
+            return
+        self._show_provider("claude" if self.selected_provider == "codex" else "codex")
+
+    def _show_provider(self, provider: str) -> None:
+        self.selected_provider = (
+            "claude" if provider == "claude" and detect_claude() else "codex"
+        )
         with self._state_lock:
-            return self.state_store.load().keep_five_hour_window_active
+            state = self.state_store.load()
+            state.selected_provider = self.selected_provider
+            self.state_store.save(state)
+        self.show_widget()
 
-    @staticmethod
-    def _window_keeper_window_seconds(usage: UsageSnapshot | None = None) -> int:
+    def _start_claude_polling(self) -> None:
+        if self._claude_poll_source is None and not self._quitting:
+            self._claude_poll_source = self._after_seconds(
+                _CLAUDE_POLL_SECONDS,
+                self._claude_poll_tick,
+            )
+
+    def _claude_poll_tick(self) -> None:
+        self._claude_poll_source = None
+        if self._quitting:
+            return
+        if detect_claude():
+            self._refresh_claude_usage()
+        self._start_claude_polling()
+
+    def _refresh_claude_usage(self) -> None:
+        if self._claude_refreshing:
+            return
+        self._claude_refreshing = True
+        self._run_async(
+            self.claude_keeper._read_and_store_usage,
+            self._claude_usage_finished,
+        )
+
+    def _claude_usage_finished(
+        self, usage: UsageSnapshot | None, error: BaseException | None
+    ) -> None:
+        self._claude_refreshing = False
+        keeper = self.claude_keeper
         if (
             usage is not None
-            and usage.five_hour_window_minutes is not None
-            and usage.five_hour_window_minutes > 0
+            and keeper._window_keeper_enabled()
+            and not keeper._window_keeper_busy
         ):
-            return usage.five_hour_window_minutes * 60
-        return _WINDOW_KEEPER_DEFAULT_WINDOW_SECONDS
-
-    def _usage_has_active_five_hour_window(
-        self, usage: UsageSnapshot, now: datetime
-    ) -> bool:
-        return (
-            usage.five_hour_used_percent is not None
-            and usage.five_hour_used_percent > 0
-            and usage.five_hour_reset_at is not None
-            and usage.five_hour_reset_at > now
-        )
-
-    def _usage_looks_like_idle_five_hour_window(
-        self, usage: UsageSnapshot, now: datetime
-    ) -> bool:
-        if usage.five_hour_reset_at is None or usage.five_hour_reset_at <= now:
-            return True
-        if usage.five_hour_used_percent is None or usage.five_hour_used_percent > 0:
-            return False
-        remaining = (usage.five_hour_reset_at - usage.checked_at).total_seconds()
-        return (
-            remaining
-            >= self._window_keeper_window_seconds(usage)
-            - _WINDOW_KEEPER_IDLE_RESET_TOLERANCE_SECONDS
-        )
-
-    def _choose_window_keeper_due_at(
-        self, usage: UsageSnapshot, state: object, now: datetime
-    ) -> datetime:
-        observed_target = (
-            usage.five_hour_reset_at
-            + timedelta(seconds=_WINDOW_KEEPER_GRACE_SECONDS)
-            if usage.five_hour_reset_at is not None
-            and usage.five_hour_reset_at > now
-            else None
-        )
-        stored_target = getattr(state, "next_window_keeper_due_at", None)
-        if self._usage_has_active_five_hour_window(usage, now) and observed_target:
-            if stored_target is None or stored_target <= now:
-                return observed_target
-            return min(stored_target, observed_target)
-        if stored_target is not None:
-            return stored_target
-        if self._usage_looks_like_idle_five_hour_window(usage, now):
-            last_success = getattr(state, "last_window_keeper_success_at", None)
-            if last_success is not None:
-                return last_success + timedelta(
-                    seconds=self._window_keeper_window_seconds(usage)
-                    + _WINDOW_KEEPER_GRACE_SECONDS
-                )
-            return now + timedelta(seconds=1)
-        if observed_target is not None:
-            return observed_target
-        return now + timedelta(seconds=1)
-
-    def _refresh_window_keeper_schedule(self) -> None:
-        if self._window_keeper_busy or not self._window_keeper_enabled():
+            keeper._schedule_window_keeper_from_usage(usage)
+        if (
+            self.window is None
+            or not self.window.get_visible()
+            or self.selected_provider != "claude"
+        ):
             return
-        self._window_keeper_busy = True
-        self._run_async(
-            self._read_and_store_usage,
-            self._window_keeper_schedule_refreshed,
-        )
-
-    def _window_keeper_schedule_refreshed(
-        self,
-        usage: UsageSnapshot | None,
-        error: BaseException | None,
-    ) -> None:
-        self._window_keeper_busy = False
-        if not self._window_keeper_enabled():
-            return
+        state = keeper.state_store.load()
         if error is not None or usage is None:
-            detail = str(error) if error is not None else "usage unavailable"
-            self._schedule_window_keeper_retry(
-                _WINDOW_KEEPER_RETRY_SECONDS,
-                f"5-hour auto-roll unavailable; retrying in 1m: {detail}",
+            self.window.show_error(
+                str(error) if error else "Claude account is unavailable",
+                state.last_global_reset,
             )
-            return
-        self._schedule_window_keeper_from_usage(usage)
-
-    def _schedule_window_keeper_from_usage(self, usage: UsageSnapshot) -> None:
-        if not self._window_keeper_enabled():
-            return
-        now = utc_now()
-        with self._state_lock:
-            state = self.state_store.load()
-        if (
-            usage.used_percent is not None
-            and usage.used_percent >= 100
-            and usage.reset_at is not None
-            and usage.reset_at > now
-        ):
-            target = usage.reset_at + timedelta(
-                seconds=_WINDOW_KEEPER_GRACE_SECONDS
-            )
-            self._schedule_window_keeper_at(
-                target,
-                "5-hour auto-roll paused at the weekly limit; "
-                f"resumes {target.astimezone():%a %H:%M}",
-            )
-            return
-        if state.next_window_keeper_retry_at is not None:
-            if state.next_window_keeper_retry_at > now:
-                self._schedule_window_keeper_retry_at(
-                    state.next_window_keeper_retry_at,
-                    "5-hour auto-roll waiting for retry backoff"
-                    f"{self._window_keeper_history_suffix()}",
-                )
-                return
-        target = self._choose_window_keeper_due_at(usage, state, now)
-        if target > now:
-            self._schedule_window_keeper_at(
-                target,
-                "5-hour auto-roll on · "
-                f"next tiny request {target.astimezone():%a %H:%M}"
-                f"{self._window_keeper_history_suffix()}",
-            )
-            return
-        self._schedule_window_keeper_at(
-            target,
-            "5-hour auto-roll on · activating an overdue window"
-            f"{self._window_keeper_history_suffix()}",
-        )
-
-    def _schedule_window_keeper_at(
-        self, target: datetime, message: str
-    ) -> None:
-        self._cancel_window_keeper_timer()
-        with self._state_lock:
-            state = self.state_store.load()
-            state.next_window_keeper_due_at = target
-            state.next_window_keeper_retry_at = None
-            self.state_store.save(state)
-        seconds = max(1, math.ceil((target - utc_now()).total_seconds()))
-        self._window_keeper_source = self._after_seconds(
-            seconds,
-            self._window_keeper_timer_fired,
-        )
-        self._set_window_keeper_message(message)
-
-    def _schedule_window_keeper_retry(self, seconds: int, message: str) -> None:
-        self._schedule_window_keeper_retry_at(
-            utc_now() + timedelta(seconds=seconds), message
-        )
-
-    def _schedule_window_keeper_retry_at(
-        self, target: datetime, message: str
-    ) -> None:
-        self._cancel_window_keeper_timer()
-        with self._state_lock:
-            state = self.state_store.load()
-            state.next_window_keeper_retry_at = target
-            self.state_store.save(state)
-        seconds = max(1, math.ceil((target - utc_now()).total_seconds()))
-        self._window_keeper_source = self._after_seconds(
-            seconds,
-            self._window_keeper_retry_fired,
-        )
-        self._set_window_keeper_message(message)
-
-    def _cancel_window_keeper_timer(self) -> None:
-        if self._window_keeper_source is not None:
-            self._cancel_source(self._window_keeper_source)
-            self._window_keeper_source = None
-
-    def _start_window_keeper_watchdog(self) -> None:
-        if self._window_keeper_watchdog_source is None:
-            self._window_keeper_watchdog_source = self._after_seconds(
-                _WINDOW_KEEPER_WATCHDOG_SECONDS,
-                self._window_keeper_watchdog_tick,
-            )
-
-    def _cancel_window_keeper_watchdog(self) -> None:
-        if self._window_keeper_watchdog_source is not None:
-            self._cancel_source(self._window_keeper_watchdog_source)
-            self._window_keeper_watchdog_source = None
-
-    def _window_keeper_watchdog_tick(self) -> None:
-        self._window_keeper_watchdog_source = None
-        if not self._window_keeper_enabled():
-            return
-        if self._window_keeper_busy:
-            self._start_window_keeper_watchdog()
-            return
-        with self._state_lock:
-            state = self.state_store.load()
-            usage = state.last_known_usage
-            due_at = state.next_window_keeper_due_at
-            retry_at = state.next_window_keeper_retry_at
-        now = utc_now()
-        if (
-            usage is not None
-            and usage.used_percent is not None
-            and usage.used_percent >= 100
-            and usage.reset_at is not None
-            and usage.reset_at > now
-        ):
-            self._start_window_keeper_watchdog()
-            return
-        if retry_at is not None and retry_at > now:
-            if self._window_keeper_source is None:
-                self._schedule_window_keeper_retry_at(
-                    retry_at,
-                    "5-hour auto-roll waiting for retry backoff"
-                    f"{self._window_keeper_history_suffix()}",
-                )
-            self._start_window_keeper_watchdog()
-            return
-        if retry_at is not None and retry_at <= now:
-            self._cancel_window_keeper_timer()
-            self._refresh_window_keeper_schedule()
-            self._start_window_keeper_watchdog()
-            return
-        if due_at is not None:
-            if due_at <= now:
-                self._cancel_window_keeper_timer()
-                if (
-                    usage is not None
-                    and self._usage_has_active_five_hour_window(usage, now)
-                ):
-                    self._schedule_window_keeper_from_usage(usage)
-                else:
-                    self._window_keeper_timer_fired()
-                self._start_window_keeper_watchdog()
-                return
-            self._schedule_window_keeper_at(
-                due_at,
-                "5-hour auto-roll on · "
-                f"next tiny request {due_at.astimezone():%a %H:%M}"
-                f"{self._window_keeper_history_suffix()}",
-            )
-            self._start_window_keeper_watchdog()
-            return
-        if (
-            usage is None
-            or usage.five_hour_reset_at is None
-            or usage.five_hour_reset_at
-            + timedelta(seconds=_WINDOW_KEEPER_GRACE_SECONDS)
-            <= now
-        ):
-            self._refresh_window_keeper_schedule()
-        self._start_window_keeper_watchdog()
-
-    def _window_keeper_timer_fired(self) -> None:
-        self._window_keeper_source = None
-        if not self._window_keeper_enabled() or self._window_keeper_busy:
-            return
-        self._window_keeper_busy = True
-        self._set_window_keeper_message("Sending the tiny 5-hour activation request…")
-        self._run_async(
-            self._activate_and_read_usage,
-            self._window_keeper_activation_finished,
-        )
-
-    def _window_keeper_retry_fired(self) -> None:
-        self._window_keeper_source = None
-        self._refresh_window_keeper_schedule()
-
-    def _activate_and_read_usage(self) -> UsageSnapshot:
-        with self._account_query_lock:
-            attempted_at = utc_now()
-            self._record_window_keeper_outcome(attempted_at=attempted_at)
-            try:
-                self.codex.activate_five_hour_window()
-            except Exception as exc:
-                self._record_window_keeper_outcome(
-                    attempted_at=attempted_at,
-                    error=str(exc),
-                )
-                raise
-            self._record_window_keeper_outcome(
-                attempted_at=attempted_at,
-                succeeded_at=utc_now(),
-            )
-            return self._read_and_store_usage_unlocked()
-
-    def _record_window_keeper_outcome(
-        self,
-        *,
-        attempted_at: datetime,
-        succeeded_at: datetime | None = None,
-        error: str | None = None,
-    ) -> None:
-        with self._state_lock:
-            state = self.state_store.load()
-            state.last_window_keeper_attempt_at = attempted_at
-            if succeeded_at is not None:
-                state.last_window_keeper_success_at = succeeded_at
-                state.next_window_keeper_due_at = succeeded_at + timedelta(
-                    seconds=_WINDOW_KEEPER_DEFAULT_WINDOW_SECONDS
-                    + _WINDOW_KEEPER_GRACE_SECONDS
-                )
-                state.next_window_keeper_retry_at = None
-            state.last_window_keeper_error = error[:500] if error else None
-            self.state_store.save(state)
-
-    def _window_keeper_history_suffix(self) -> str:
-        with self._state_lock:
-            state = self.state_store.load()
-        if state.last_window_keeper_error:
-            return " · last attempt failed"
-        if state.last_window_keeper_success_at is not None:
-            return (
-                " · last sent "
-                f"{state.last_window_keeper_success_at.astimezone():%a %H:%M}"
-            )
-        return ""
-
-    def _window_keeper_activation_finished(
-        self,
-        usage: UsageSnapshot | None,
-        error: BaseException | None,
-    ) -> None:
-        self._window_keeper_busy = False
-        if not self._window_keeper_enabled():
-            return
-        if error is not None or usage is None:
-            detail = str(error) if error is not None else "usage unavailable"
-            self._schedule_window_keeper_retry(
-                _WINDOW_KEEPER_RETRY_SECONDS,
-                f"5-hour activation failed; retrying in 1m: {detail}",
-            )
-            return
-        if (
-            usage.five_hour_reset_at is None
-            or usage.five_hour_reset_at
-            <= utc_now() + timedelta(seconds=_WINDOW_KEEPER_GRACE_SECONDS)
-        ):
-            self._schedule_window_keeper_retry(
-                _WINDOW_KEEPER_PROPAGATION_SECONDS,
-                "Activation sent; waiting for the new 5-hour window",
-            )
-            return
-        self._schedule_window_keeper_from_usage(usage)
-        if self.window is not None and self.window.get_visible():
-            state = self.state_store.load()
+        else:
             self.window.show_usage(usage, state.last_global_reset)
 
-    def _set_window_keeper_message(self, message: str) -> None:
-        self._window_keeper_message = message
-        if self.window is not None:
-            self.window.set_window_keeper_state(
-                self._window_keeper_enabled(),
-                message,
-            )
+    def claude_reset_observed(self, event: ResetEvent) -> None:
+        if self._tray is not None:
+            self._tray.notify("Claude account reset", event.summary)
 
     def _usage_refresh_finished(
         self, usage: UsageSnapshot | None, error: BaseException | None
     ) -> None:
         self._usage_refreshing = False
-        if self.window is None or not self.window.get_visible():
+        if (
+            self.window is None
+            or not self.window.get_visible()
+            or self.selected_provider != "codex"
+        ):
             return
         state = self.state_store.load()
         if error is not None or usage is None:
@@ -1909,7 +1819,11 @@ class CodexWidgetApplication:
         else:
             body = "⏳ Tibo announced a reset. Your account is still updating."
         self._send_reset_notification(event, body, final=True)
-        if self.window is not None and self.window.get_visible():
+        if (
+            self.window is not None
+            and self.window.get_visible()
+            and self.selected_provider == "codex"
+        ):
             self.window.show_usage(usage, event)
 
     def _send_reset_notification(

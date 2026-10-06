@@ -13,12 +13,13 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from codex_widget.models import AppState, ResetEvent, UsageSnapshot
-from codex_widget.state import StateStore
+from codex_widget.window_keeper import WindowKeeperMixin
 from codex_widget.windows_app import (
     CodexWidgetApplication,
     _CommandEndpoint,
     _CommandServer,
     _parse_arguments,
+    _TkMainLoop,
 )
 
 
@@ -68,7 +69,7 @@ class TimerApplication:
         CodexWidgetApplication._window_keeper_activation_finished
     )
     _window_keeper_history_suffix = CodexWidgetApplication._window_keeper_history_suffix
-    set_window_keeper_enabled = CodexWidgetApplication.set_window_keeper_enabled
+    set_window_keeper_enabled = WindowKeeperMixin.set_window_keeper_enabled
 
     def __init__(self) -> None:
         self.state_store = MemoryStateStore()
@@ -126,6 +127,13 @@ class NotificationApplication:
 
 
 class WindowsAppUnitTests(unittest.TestCase):
+    def timer_application(self) -> TimerApplication:
+        application = TimerApplication()
+        self.enterContext(
+            patch("codex_widget.window_keeper.GLib", _TkMainLoop(application))
+        )
+        return application
+
     def test_argument_parsing_matches_linux_precedence(self) -> None:
         self.assertEqual(_parse_arguments(["codex-widget"]).command, "show")
         self.assertEqual(
@@ -157,7 +165,7 @@ class WindowsAppUnitTests(unittest.TestCase):
 
     def test_window_keeper_schedule_uses_tk_after_adapter(self) -> None:
         now = datetime(2026, 8, 31, 10, tzinfo=UTC)
-        application = TimerApplication()
+        application = self.timer_application()
         application.state_store.state.keep_five_hour_window_active = True
         usage = UsageSnapshot(
             used_percent=25,
@@ -169,7 +177,7 @@ class WindowsAppUnitTests(unittest.TestCase):
             five_hour_window_minutes=300,
         )
 
-        with patch("codex_widget.windows_app.utc_now", return_value=now):
+        with patch("codex_widget.window_keeper.utc_now", return_value=now):
             application._schedule_window_keeper_from_usage(usage)
 
         self.assertEqual(application.scheduled[0][0], 3610)
@@ -181,7 +189,7 @@ class WindowsAppUnitTests(unittest.TestCase):
 
     def test_window_keeper_does_not_postpone_repeated_drifting_resets(self) -> None:
         start = datetime(2026, 8, 31, 10, tzinfo=UTC)
-        application = TimerApplication()
+        application = self.timer_application()
         application.state_store.state.keep_five_hour_window_active = True
 
         for minutes in (0, 1, 60, 300):
@@ -196,7 +204,7 @@ class WindowsAppUnitTests(unittest.TestCase):
                 five_hour_window_minutes=300,
                 checked_at=now,
             )
-            with patch("codex_widget.windows_app.utc_now", return_value=now):
+            with patch("codex_widget.window_keeper.utc_now", return_value=now):
                 application._schedule_window_keeper_from_usage(usage)
 
         fixed_due = start + timedelta(hours=5, seconds=10)
@@ -209,7 +217,7 @@ class WindowsAppUnitTests(unittest.TestCase):
 
     def test_window_keeper_idle_zero_usage_starts_immediately(self) -> None:
         now = datetime(2026, 8, 31, 10, tzinfo=UTC)
-        application = TimerApplication()
+        application = self.timer_application()
         application.state_store.state.keep_five_hour_window_active = True
         usage = UsageSnapshot(
             used_percent=25,
@@ -222,7 +230,7 @@ class WindowsAppUnitTests(unittest.TestCase):
             checked_at=now,
         )
 
-        with patch("codex_widget.windows_app.utc_now", return_value=now):
+        with patch("codex_widget.window_keeper.utc_now", return_value=now):
             application._schedule_window_keeper_from_usage(usage)
 
         self.assertEqual(application.scheduled[-1][0], 1)
@@ -233,7 +241,7 @@ class WindowsAppUnitTests(unittest.TestCase):
 
     def test_window_keeper_recovers_overdue_restart_from_last_success(self) -> None:
         now = datetime(2026, 8, 31, 10, tzinfo=UTC)
-        application = TimerApplication()
+        application = self.timer_application()
         application.state_store.state.keep_five_hour_window_active = True
         application.state_store.state.last_window_keeper_success_at = (
             now - timedelta(hours=6)
@@ -249,7 +257,7 @@ class WindowsAppUnitTests(unittest.TestCase):
             checked_at=now,
         )
 
-        with patch("codex_widget.windows_app.utc_now", return_value=now):
+        with patch("codex_widget.window_keeper.utc_now", return_value=now):
             application._schedule_window_keeper_from_usage(usage)
 
         self.assertEqual(application.scheduled[-1][0], 1)
@@ -257,7 +265,7 @@ class WindowsAppUnitTests(unittest.TestCase):
 
     def test_window_keeper_overdue_due_respects_current_active_window(self) -> None:
         now = datetime(2026, 8, 31, 10, tzinfo=UTC)
-        application = TimerApplication()
+        application = self.timer_application()
         application.state_store.state.keep_five_hour_window_active = True
         application.state_store.state.next_window_keeper_due_at = (
             now - timedelta(hours=1)
@@ -273,7 +281,7 @@ class WindowsAppUnitTests(unittest.TestCase):
             checked_at=now,
         )
 
-        with patch("codex_widget.windows_app.utc_now", return_value=now):
+        with patch("codex_widget.window_keeper.utc_now", return_value=now):
             application._schedule_window_keeper_from_usage(usage)
 
         self.assertEqual(application.activations, 0)
@@ -284,27 +292,31 @@ class WindowsAppUnitTests(unittest.TestCase):
 
     def test_window_keeper_watchdog_fires_late_overdue_due(self) -> None:
         now = datetime(2026, 8, 31, 10, tzinfo=UTC)
-        application = TimerApplication()
+        application = self.timer_application()
         application.state_store.state.keep_five_hour_window_active = True
         application.state_store.state.next_window_keeper_due_at = (
             now - timedelta(minutes=3)
         )
         application._window_keeper_source = "after-long-window"
+        application._start_window_keeper_watchdog()
+        seconds, watchdog, _args = application.scheduled[-1]
 
-        with patch("codex_widget.windows_app.utc_now", return_value=now):
-            application._window_keeper_watchdog_tick()
+        with patch("codex_widget.window_keeper.utc_now", return_value=now):
+            watchdog()
 
+        self.assertEqual(seconds, 60)
         self.assertEqual(application.activations, 1)
         self.assertIsNotNone(application._window_keeper_watchdog_source)
+        self.assertIs(application.scheduled[-1][1], watchdog)
 
     def test_window_keeper_failure_keeps_due_and_uses_retry_timer(self) -> None:
         now = datetime(2026, 8, 31, 10, tzinfo=UTC)
-        application = TimerApplication()
+        application = self.timer_application()
         application.state_store.state.keep_five_hour_window_active = True
         due = now - timedelta(minutes=1)
         application.state_store.state.next_window_keeper_due_at = due
 
-        with patch("codex_widget.windows_app.utc_now", return_value=now):
+        with patch("codex_widget.window_keeper.utc_now", return_value=now):
             application._window_keeper_activation_finished(None, RuntimeError("nope"))
 
         self.assertEqual(application.state_store.state.next_window_keeper_due_at, due)
@@ -313,11 +325,11 @@ class WindowsAppUnitTests(unittest.TestCase):
             now + timedelta(seconds=60),
         )
         self.assertEqual(application.scheduled[-1][0], 60)
-        self.assertIn("activation failed", application.messages[-1])
+        self.assertIn("activation unconfirmed", application.messages[-1])
 
     def test_window_keeper_refresh_respects_failure_backoff(self) -> None:
         now = datetime(2026, 8, 31, 10, tzinfo=UTC)
-        application = TimerApplication()
+        application = self.timer_application()
         application.state_store.state.keep_five_hour_window_active = True
         application.state_store.state.next_window_keeper_due_at = (
             now - timedelta(minutes=1)
@@ -338,7 +350,7 @@ class WindowsAppUnitTests(unittest.TestCase):
             checked_at=now,
         )
 
-        with patch("codex_widget.windows_app.utc_now", return_value=now):
+        with patch("codex_widget.window_keeper.utc_now", return_value=now):
             application._schedule_window_keeper_from_usage(usage)
 
         self.assertEqual(application.activations, 0)
@@ -350,7 +362,7 @@ class WindowsAppUnitTests(unittest.TestCase):
 
     def test_window_keeper_weekly_limit_pauses_until_weekly_reset(self) -> None:
         now = datetime(2026, 8, 31, 10, tzinfo=UTC)
-        application = TimerApplication()
+        application = self.timer_application()
         application.state_store.state.keep_five_hour_window_active = True
         usage = UsageSnapshot(
             used_percent=100,
@@ -363,14 +375,14 @@ class WindowsAppUnitTests(unittest.TestCase):
             checked_at=now,
         )
 
-        with patch("codex_widget.windows_app.utc_now", return_value=now):
+        with patch("codex_widget.window_keeper.utc_now", return_value=now):
             application._schedule_window_keeper_from_usage(usage)
 
         self.assertEqual(application.scheduled[-1][0], 86410)
         self.assertIn("paused at the weekly limit", application.messages[-1])
 
     def test_window_keeper_disable_clears_persisted_due_and_cancels_timers(self) -> None:
-        application = TimerApplication()
+        application = self.timer_application()
         application.state_store.state.keep_five_hour_window_active = True
         application.state_store.state.next_window_keeper_due_at = datetime(
             2026, 8, 31, 15, tzinfo=UTC
@@ -423,6 +435,10 @@ from codex_widget.models import ResetEvent, UsageSnapshot
 import codex_widget.windows_app as windows_app
 from codex_widget.windows_app import CodexWidgetApplication
 
+# Do not collide with an installed widget that is already running.
+windows_app._SingleInstanceLock._name = f"Local\\CodexResetWidgetSmoke-{os.getpid()}"
+windows_app.detect_claude = lambda: "claude-smoke"
+
 events = []
 
 class FakeWatcher:
@@ -435,7 +451,7 @@ class FakeWatcher:
         return PollOutcome.SEEDED, event, type("State", (), {"last_known_usage": None})()
 
 class FakeCodex:
-    def read_rate_limits(self):
+    def read_rate_limits(self, **_kwargs):
         return UsageSnapshot(
             used_percent=12,
             reset_at=datetime.now(UTC) + timedelta(days=2),
@@ -538,6 +554,7 @@ app = CodexWidgetApplication()
 watcher = FakeWatcher()
 app.watcher = watcher
 app.codex = FakeCodex()
+app.claude_keeper.codex = FakeCodex()
 app._send_reset_notification = lambda *args, **kwargs: None
 app._ensure_tk_root()
 app._ensure_resident()
@@ -574,8 +591,22 @@ def screenshot():
         write_window_png(app.window, target)
         events.append("screenshot")
 
+def switch_to_claude():
+    app.window._on_provider_clicked(None)
+    if app.selected_provider == "claude" and app.window.brand.cget("text") == "CLAUDE":
+        events.append("claude-shown")
+
+def claude_screenshot():
+    target = os.environ.get("CODEX_WIDGET_SCREENSHOT")
+    if target and app.window.five_hour_value.variable.get() == "3%":
+        write_window_png(app.window, target.replace(".png", "-claude.png"))
+        events.append("claude-screenshot")
+
 def verify():
-    required = {"pin-on", "pin-off", "hidden", "shown", "tray-check", "tray-select", "screenshot"}
+    required = {
+        "pin-on", "pin-off", "hidden", "shown", "tray-check", "tray-select",
+        "screenshot", "claude-shown", "claude-screenshot",
+    }
     missing = sorted(required - set(events))
     if missing:
         raise AssertionError(f"missing smoke events: {missing}; got {events}")
@@ -590,7 +621,9 @@ app._root.after(900, show_widget)
 app._root.after(1100, tray_check)
 app._root.after(1300, tray_select)
 app._root.after(1500, screenshot)
-app._root.after(1800, verify)
+app._root.after(1700, switch_to_claude)
+app._root.after(2200, claude_screenshot)
+app._root.after(2500, verify)
 app._root.mainloop()
 print("ready")
 """
@@ -630,6 +663,8 @@ print("ready")
             self.assertEqual(stderr, "")
             self.assertTrue(screenshot.exists())
             self.assertGreater(screenshot.stat().st_size, 1000)
+            claude_screenshot = screenshot.with_name("windows-widget-smoke-claude.png")
+            self.assertGreater(claude_screenshot.stat().st_size, 1000)
 
 
 if __name__ == "__main__":

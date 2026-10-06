@@ -37,7 +37,10 @@ class KeeperCycleTests(unittest.TestCase):
             app._after_seconds = lambda seconds, callback: timers.append((seconds, callback)) or str(len(timers))
             app._run_async = lambda work, done: done(work(), None)
 
-            with patch('codex_widget.windows_app.utc_now', side_effect=lambda: now):
+            with (
+                patch('codex_widget.window_keeper.utc_now', side_effect=lambda: now),
+                patch('codex_widget.window_keeper.time.sleep'),
+            ):
                 app._schedule_window_keeper_from_usage(app.codex.read_rate_limits())
                 now += timedelta(seconds=timers[-1][0])
                 timers[-1][1]()

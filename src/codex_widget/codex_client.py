@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import platform
 import queue
 import re
 import shutil
@@ -14,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from .models import UsageSnapshot
+from . import __version__
 
 
 class CodexClientError(RuntimeError):
@@ -77,13 +79,47 @@ def _windows_codex_app_executable() -> str | None:
     return str(max(candidates, key=sort_key))
 
 
+def _linux_npm_native_executable(installed: str) -> str | None:
+    """Use the npm package's native CLI without depending on its Node launcher."""
+    if platform.system() != "Linux":
+        return None
+    launcher = Path(installed).resolve()
+    package = launcher.parent.parent
+    if (
+        launcher.name != "codex.js"
+        or launcher.parent.name != "bin"
+        or package.name != "codex"
+        or package.parent.name != "@openai"
+    ):
+        return None
+
+    architecture = {
+        "x86_64": ("x64", "x86_64-unknown-linux-musl"),
+        "aarch64": ("arm64", "aarch64-unknown-linux-musl"),
+    }.get(platform.machine())
+    if architecture is None:
+        return None
+    suffix, target = architecture
+    vendor_roots = (
+        package / "node_modules" / "@openai" / f"codex-linux-{suffix}" / "vendor",
+        package.parent / f"codex-linux-{suffix}" / "vendor",
+        package / "vendor",
+    )
+    for root in vendor_roots:
+        for directory in ("bin", "codex"):
+            native = root / target / directory / "codex"
+            if native.is_file() and os.access(native, os.X_OK):
+                return str(native)
+    return None
+
+
 def _resolve_executable(executable: str) -> str:
     if _looks_like_path(executable):
         return executable
 
     resolved = shutil.which(executable)
     if resolved is not None:
-        return resolved
+        return _linux_npm_native_executable(resolved) or resolved
 
     if os.name == "nt" and executable.lower() in {"codex", "codex.exe", "codex.cmd"}:
         fallback = _windows_codex_app_executable()
@@ -184,12 +220,13 @@ class CodexClient:
     def read_rate_limits(self) -> UsageSnapshot:
         reader: _ProcessLineReader | None = None
         failed = True
+        stderr = tempfile.TemporaryFile()
         try:
             process = subprocess.Popen(
                 [self.executable, "app-server", "--stdio"],
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
+                stderr=stderr,
                 text=True,
                 encoding="utf-8",
                 errors="replace",
@@ -197,6 +234,7 @@ class CodexClient:
                 **_hidden_subprocess_kwargs(),
             )
         except OSError as exc:
+            stderr.close()
             raise CodexClientError(f"cannot start Codex app-server: {exc}") from exc
 
         try:
@@ -210,7 +248,7 @@ class CodexClient:
                         "clientInfo": {
                             "name": "codex-widget",
                             "title": "Codex Widget",
-                            "version": "0.1.0",
+                            "version": __version__,
                         }
                     },
                 },
@@ -226,8 +264,23 @@ class CodexClient:
             snapshot = self._parse_snapshot(result)
             failed = False
             return snapshot
+        except CodexClientError as exc:
+            try:
+                process.wait(timeout=0.1)
+            except subprocess.TimeoutExpired:
+                pass
+            if process.poll() is not None:
+                stderr.seek(0, os.SEEK_END)
+                stderr.seek(max(0, stderr.tell() - 2048))
+                detail = (
+                    stderr.read().decode("utf-8", errors="replace").strip().splitlines()
+                )
+                if detail:
+                    raise CodexClientError(f"{exc}: {detail[-1][:500]}") from exc
+            raise
         finally:
             self._close_app_server(process, reader, force=failed)
+            stderr.close()
 
     def activate_five_hour_window(self) -> None:
         arguments = [

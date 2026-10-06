@@ -55,6 +55,10 @@ fi
 if [ "$SERVICE_CHANGED" = true ]; then
   systemctl --user daemon-reload
 fi
-systemctl --user enable --now codex-widget.service
+# Stop an old interactive primary too, then let systemd claim the bus name.
+"$BIN_DIR/codex-widget" --quit
+systemctl --user reenable codex-widget.service
+systemctl --user reset-failed codex-widget.service
+systemctl --user restart codex-widget.service
 
 printf '%s\n' "Codex Widget installed. Open it from GNOME or run: $BIN_DIR/codex-widget"

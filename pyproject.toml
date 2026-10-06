@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "codex-widget"
-version = "0.1.0"
-description = "A tiny Windows and Linux widget for Codex usage and global reset notifications"
+version = "0.2.2"
+description = "A tiny Windows and Linux widget for Codex and Claude usage and reset notifications"
 requires-python = ">=3.11"
 license = { text = "MIT" }
 
@@ -25,4 +25,3 @@ codex_widget = ["assets/*.svg"]
 "share/applications" = ["data/io.github.codex_widget.CodexWidget.desktop"]
 "share/systemd/user" = ["data/codex-widget.service"]
 "share/icons/hicolor/scalable/status" = ["src/codex_widget/assets/codex-widget-symbolic.svg"]
-
