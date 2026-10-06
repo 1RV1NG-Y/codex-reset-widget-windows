@@ -71,11 +71,15 @@ PC is asleep or the widget is stopped.
 
 State lives in `%LOCALAPPDATA%\CodexWidget\state.json` (Codex) and
 `claude-state.json` (Claude). Startup, exit, and failure details are recorded
-alongside them in `launcher.log`. To update, rerun the installer.
+alongside them in `launcher.log`. To update, rerun the installer. Updates
+reuse the existing installation directory recorded in the logon task or Start
+menu shortcut unless you pass `-InstallDir`. The installer waits for the running
+widget to exit before starting the new version.
 When installed from a packaged app that redirects AppData, the installer records
 the physical installation path in the shortcuts and task. The installed launcher
 keeps state and logs in that same directory, so sign-in launches use your existing
-settings. The installer prints this resolved location.
+settings. The installer prints this resolved location and warns when a new
+installation is being redirected into an app package.
 To uninstall, run the installer with `-NoStartup -NoLaunch`, quit through the tray,
 delete the Codex Widget Start menu shortcut, then delete `%LOCALAPPDATA%\CodexWidget`
 (including saved state).

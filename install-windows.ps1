@@ -17,16 +17,65 @@ if ($LASTEXITCODE -ne 0) { throw 'Python 3.11+ with Tcl/Tk is required.' }
 $pythonw = Join-Path (Split-Path $pythonExe) 'pythonw.exe'
 if (-not (Test-Path -LiteralPath $pythonw)) { throw "Cannot find $pythonw" }
 
+$taskName = 'Codex Widget'
+$launcherName = 'launch-codex-widget.pyw'
+
+function Get-ExistingInstallDir {
+    # The logon task and Start menu shortcut record the physical install path.
+    $arguments = @()
+    $task = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+    if ($task) { $arguments += @($task.Actions | ForEach-Object { $_.Arguments }) }
+    $shortcutPath = Join-Path ([Environment]::GetFolderPath('Programs')) 'Codex Widget.lnk'
+    if (Test-Path -LiteralPath $shortcutPath) {
+        $arguments += (New-Object -ComObject WScript.Shell).CreateShortcut($shortcutPath).Arguments
+    }
+    foreach ($argument in $arguments) {
+        if ($argument -match '^"([^"]+)"') {
+            $candidate = $Matches[1]
+            if ((Split-Path -Leaf $candidate) -eq $launcherName -and (Test-Path -LiteralPath $candidate)) {
+                return Split-Path -Parent $candidate
+            }
+        }
+    }
+    return $null
+}
+
+function Get-WidgetProcesses([string]$Launcher) {
+    @(Get-CimInstance Win32_Process -Filter "Name like 'python%'" | Where-Object {
+        $_.CommandLine -and $_.CommandLine.IndexOf($Launcher, [StringComparison]::OrdinalIgnoreCase) -ge 0
+    })
+}
+
+# Updates stay where the widget is installed, keeping its state, even when this
+# installer runs inside a packaged app that redirects %LOCALAPPDATA%.
+$existing = $null
+if (-not $PSBoundParameters.ContainsKey('InstallDir')) {
+    $existing = Get-ExistingInstallDir
+    if ($existing) { $InstallDir = $existing }
+}
+
 $InstallDir = [IO.Path]::GetFullPath($InstallDir)
 New-Item -ItemType Directory -Force -Path (Join-Path $InstallDir 'src') | Out-Null
 # Packaged terminals can redirect AppData writes. Windows logon tasks do not
 # inherit that redirection, so persist the actual on-disk path in their actions.
 $InstallDir = & $pythonExe -c 'from pathlib import Path; import sys; print(Path(sys.argv[1]).resolve(strict=True))' $InstallDir
 if ($LASTEXITCODE -ne 0) { throw 'Cannot resolve the installed application directory.' }
-$launcher = Join-Path $InstallDir 'launch-codex-widget.pyw'
+if (-not $PSBoundParameters.ContainsKey('InstallDir') -and -not $existing -and $InstallDir -match '\\Packages\\[^\\]+\\LocalCache\\') {
+    Write-Warning "This shell redirects AppData into an app package, so the widget is installed in $InstallDir. Run the installer from a regular PowerShell window, or pass -InstallDir, to choose another location."
+}
+$launcher = Join-Path $InstallDir $launcherName
 if (Test-Path -LiteralPath $launcher) {
     & $pythonExe $launcher --quit
-    Start-Sleep -Milliseconds 700
+    # A new launch would hand its command to an instance that is still exiting.
+    $deadline = (Get-Date).AddSeconds(15)
+    while ((Get-WidgetProcesses $launcher).Count -gt 0 -and (Get-Date) -lt $deadline) {
+        Start-Sleep -Milliseconds 250
+    }
+    $remaining = Get-WidgetProcesses $launcher
+    if ($remaining.Count -gt 0) {
+        Write-Warning 'The running widget did not exit within 15 seconds; stopping it.'
+        $remaining | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+    }
 }
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'src/codex_widget') -Destination (Join-Path $InstallDir 'src') -Recurse -Force
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'launch-codex-widget.pyw') -Destination $launcher -Force
@@ -46,7 +95,6 @@ function New-WidgetShortcut([string]$Path, [string]$ExtraArgs) {
 $programs = [Environment]::GetFolderPath('Programs')
 New-WidgetShortcut (Join-Path $programs 'Codex Widget.lnk') ''
 $startupShortcut = Join-Path ([Environment]::GetFolderPath('Startup')) 'Codex Widget.lnk'
-$taskName = 'Codex Widget'
 if ($NoStartup) {
     $existingTask = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
     if ($existingTask) {
