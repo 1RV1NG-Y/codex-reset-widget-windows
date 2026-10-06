@@ -7,6 +7,7 @@
 - Make Claude Code support work on Windows: native `claude.exe` detection, a Windows lock for token renewal, the system temp directory as the working directory, and a hidden console for activation requests.
 - Combine Windows Codex CLI rediscovery with Linux's npm native-binary bypass, and include app-server startup errors in the widget status.
 - Usage refreshes no longer reopen a hidden card. Dismissal waits for focus to settle, and pending dismissals are cancelled when the card is reopened, focused, or pinned. The tray's check action also refreshes visible usage.
+- Respect Claude's `Retry-After` when usage or login renewal is rate limited (at least five minutes, at most six hours), and show the actual remaining wait. After the server definitively rejects a login, stop sending it until the credentials change, instead of retrying it every refresh and provoking rate limits.
 - Installer updates reuse the existing installation directory, so running it from a packaged app that redirects AppData no longer creates a second install. It also waits for the running widget to exit before launching the new version.
 
 ## 0.2.2 — 2026-10-05

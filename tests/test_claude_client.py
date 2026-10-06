@@ -209,6 +209,76 @@ class ClaudeClientTests(unittest.TestCase):
                 client.read_rate_limits(force=force)
         self.assertEqual(opener.call_count, 1)
 
+    def test_rate_limit_honors_server_retry_after(self):
+        for retry_after, expected, wait in (
+            ("3547", 3547, "1h"),
+            ("30", 300, "5m"),
+            (None, 300, "5m"),
+            ("not-a-date", 300, "5m"),
+            ("999999", 6 * 60 * 60, "6h"),
+        ):
+            with self.subTest(retry_after=retry_after):
+                headers = {} if retry_after is None else {"Retry-After": retry_after}
+                opener = Mock(side_effect=HTTPError(USAGE_URL, 429, "slow down", headers, None))
+                client = self.client(opener)
+                with patch("codex_widget.claude_client.time.monotonic", return_value=1000.0):
+                    with self.assertRaisesRegex(ClaudeClientError, f"retrying in {wait}$"):
+                        client.read_rate_limits()
+                self.assertEqual(client._retry_at, 1000.0 + expected)
+
+    def test_rate_limit_reports_remaining_wait(self):
+        opener = Mock(side_effect=HTTPError(
+            USAGE_URL, 429, "slow down", {"Retry-After": "3600"}, None
+        ))
+        client = self.client(opener)
+        with patch("codex_widget.claude_client.time.monotonic", return_value=1000.0):
+            with self.assertRaises(ClaudeClientError):
+                client.read_rate_limits()
+        with patch("codex_widget.claude_client.time.monotonic", return_value=1000.0 + 3300):
+            with self.assertRaisesRegex(ClaudeClientError, "retrying in 5m$"):
+                client.read_rate_limits(force=True)
+        self.assertEqual(opener.call_count, 1)
+
+    def test_rejected_login_is_not_resent_until_credentials_change(self):
+        def request(req, **_kwargs):
+            if req.get_method() == "POST":
+                raise HTTPError(USAGE_URL, 400, "Bad Request", {}, response({"error": "invalid_grant"}))
+            if req.get_header("Authorization") == "Bearer cli-new-access":
+                return response(self.data)
+            raise HTTPError(USAGE_URL, 401, "Unauthorized", {}, None)
+
+        opener = Mock(side_effect=request)
+        client = self.client(opener)
+        for force in (False, False, True):
+            with self.assertRaisesRegex(ClaudeClientError, "session expired; run claude auth login"):
+                client.read_rate_limits(force=force)
+        self.assertEqual(opener.call_count, 2)
+        document = json.loads(self.path.read_text())
+        document["claudeAiOauth"]["accessToken"] = "cli-new-access"
+        self.path.write_text(json.dumps(document))
+        self.assertEqual(client.read_rate_limits().used_percent, 42)
+        self.assertEqual(opener.call_count, 3)
+
+    def test_login_without_renewal_token_is_not_resent(self):
+        document = json.loads(self.path.read_text())
+        del document["claudeAiOauth"]["refreshToken"]
+        self.path.write_text(json.dumps(document))
+        opener = Mock(side_effect=HTTPError(USAGE_URL, 401, "Unauthorized", {}, None))
+        client = self.client(opener)
+        for _ in range(3):
+            with self.assertRaisesRegex(ClaudeClientError, "run claude auth login"):
+                client.read_rate_limits()
+        self.assertEqual(opener.call_count, 1)
+
+    def test_rejected_environment_token_is_not_resent(self):
+        opener = Mock(side_effect=HTTPError(USAGE_URL, 401, "Unauthorized", {}, None))
+        client = self.client(opener)
+        with patch.dict(os.environ, {"CLAUDE_CODE_OAUTH_TOKEN": "env-token"}):
+            for _ in range(2):
+                with self.assertRaisesRegex(ClaudeClientError, "run claude auth login"):
+                    client.read_rate_limits()
+        self.assertEqual(opener.call_count, 1)
+
     def test_network_errors_are_actionable(self):
         opener = Mock(side_effect=URLError("network down"))
         with self.assertRaisesRegex(ClaudeClientError, "connection"):

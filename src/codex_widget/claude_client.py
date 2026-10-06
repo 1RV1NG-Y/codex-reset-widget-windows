@@ -9,6 +9,7 @@ import tempfile
 import time
 from contextlib import contextmanager
 from datetime import UTC, datetime
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any, Callable, Iterator
 from urllib.error import HTTPError, URLError
@@ -30,6 +31,8 @@ _TOKEN_URL = "https://platform.claude.com/v1/oauth/token"
 # Public client identifier shipped in Claude Code's OAuth configuration.
 _CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 _MAX_BYTES = 1_000_000
+_MIN_RETRY_SECONDS = 300
+_MAX_RETRY_SECONDS = 6 * 60 * 60
 _USER_AGENT = f"codex-widget/{__version__}"
 
 
@@ -80,6 +83,29 @@ def _percent(value: object) -> float | None:
     return float(value) if math.isfinite(value) and 0 <= value <= 100 else None
 
 
+def _retry_after_seconds(exc: HTTPError) -> float:
+    """Honor the server's Retry-After, never retrying sooner than five minutes."""
+    value = exc.headers.get("Retry-After") if exc.headers is not None else None
+    try:
+        seconds = float(value)
+    except (TypeError, ValueError):
+        try:
+            seconds = (parsedate_to_datetime(value) - datetime.now(UTC)).total_seconds()
+        except (TypeError, ValueError):
+            seconds = 0
+    if not math.isfinite(seconds):
+        seconds = 0
+    return min(_MAX_RETRY_SECONDS, max(_MIN_RETRY_SECONDS, seconds))
+
+
+def _wait_text(seconds: float) -> str:
+    minutes = max(1, math.ceil(seconds / 60))
+    if minutes < 60:
+        return f"{minutes}m"
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours}h {minutes}m" if minutes else f"{hours}h"
+
+
 class ClaudeClient:
     def __init__(
         self,
@@ -99,6 +125,17 @@ class ClaudeClient:
         self._cache_token: str | None = None
         self._next_fetch = 0.0
         self._retry_at = 0.0
+        # A login the server definitively rejected; retried only once it changes.
+        self._rejected: tuple[str, str] | None = None
+
+    def _rate_limited(self, exc: HTTPError, what: str) -> ClaudeClientError:
+        delay = _retry_after_seconds(exc)
+        self._retry_at = time.monotonic() + delay
+        return ClaudeClientError(f"{what} rate limited; retrying in {_wait_text(delay)}")
+
+    def _reject(self, token: str, message: str) -> ClaudeClientError:
+        self._rejected = (token, message)
+        return ClaudeClientError(message)
 
     def _credentials(self) -> tuple[dict[str, Any], dict[str, Any]]:
         try:
@@ -132,7 +169,7 @@ class ClaudeClient:
                 return oauth["accessToken"]
             refresh = oauth.get("refreshToken")
             if not isinstance(refresh, str) or not refresh:
-                raise ClaudeClientError("Claude session expired; run claude auth login")
+                raise self._reject(old_token, "Claude session expired; run claude auth login")
             try:
                 payload = {
                     "grant_type": "refresh_token",
@@ -165,10 +202,11 @@ class ClaudeClient:
                 if latest["accessToken"] != old_token:
                     return latest["accessToken"]
                 if isinstance(failure, dict) and failure.get("error") == "invalid_grant":
-                    raise ClaudeClientError("Claude session expired; run claude auth login") from None
+                    raise self._reject(
+                        old_token, "Claude session expired; run claude auth login"
+                    ) from None
                 if exc.code == 429:
-                    self._retry_at = time.monotonic() + 300
-                    raise ClaudeClientError("Claude login renewal rate limited; retrying in 5m") from None
+                    raise self._rate_limited(exc, "Claude login renewal") from None
                 raise ClaudeClientError(
                     f"Claude login renewal failed (HTTP {exc.code}); retrying automatically"
                 ) from None
@@ -207,8 +245,11 @@ class ClaudeClient:
 
     def read_rate_limits(self, *, force: bool = False) -> UsageSnapshot:
         try:
-            if time.monotonic() < self._retry_at:
-                raise ClaudeClientError("Claude usage rate limited; retrying in a few minutes")
+            remaining = self._retry_at - time.monotonic()
+            if remaining > 0:
+                raise ClaudeClientError(
+                    f"Claude usage rate limited; retrying in {_wait_text(remaining)}"
+                )
             env_token = os.environ.get("CLAUDE_CODE_OAUTH_TOKEN")
             if env_token:
                 token = env_token
@@ -217,6 +258,9 @@ class ClaudeClient:
                 token = oauth["accessToken"]
                 # Ask usage first: the server decides whether this token is still
                 # usable. A stale local expiry must not interrupt working usage.
+            if self._rejected is not None and self._rejected[0] == token:
+                # Resending a rejected login only provokes server rate limits.
+                raise ClaudeClientError(self._rejected[1])
             if not force and token == self._cache_token and time.monotonic() < self._next_fetch:
                 if self._cached is not None:
                     return self._cached
@@ -236,14 +280,16 @@ class ClaudeClient:
                         token = self._refresh_token(token)
                         continue
                     if exc.code == 401:
-                        raise ClaudeClientError("Claude login cannot read usage; run claude auth login") from None
+                        raise self._reject(
+                            token, "Claude login cannot read usage; run claude auth login"
+                        ) from None
                     if exc.code == 403:
                         raise ClaudeClientError("Claude usage access denied (HTTP 403); retrying automatically") from None
                     if exc.code == 429:
-                        self._retry_at = time.monotonic() + 300
-                        raise ClaudeClientError("Claude usage rate limited; retrying in 5m") from None
+                        raise self._rate_limited(exc, "Claude usage") from None
                     raise ClaudeClientError(f"Claude usage request failed (HTTP {exc.code})") from None
             snapshot = self._parse_snapshot(document)
+            self._rejected = None
             self._cached = snapshot
             self._cache_token = token
             self._next_fetch = time.monotonic() + 60
