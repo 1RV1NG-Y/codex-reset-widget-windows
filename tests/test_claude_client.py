@@ -239,6 +239,24 @@ class ClaudeClientTests(unittest.TestCase):
                 client.read_rate_limits(force=True)
         self.assertEqual(opener.call_count, 1)
 
+    def test_new_login_is_tried_despite_old_token_rate_limit(self):
+        def request(req, **_kwargs):
+            if req.get_header("Authorization") == "Bearer cli-new-access":
+                return response(self.data)
+            raise HTTPError(USAGE_URL, 429, "slow down", {"Retry-After": "3600"}, None)
+
+        opener = Mock(side_effect=request)
+        client = self.client(opener)
+        for _ in range(2):
+            with self.assertRaisesRegex(ClaudeClientError, "rate limited"):
+                client.read_rate_limits()
+        self.assertEqual(opener.call_count, 1)
+        document = json.loads(self.path.read_text())
+        document["claudeAiOauth"]["accessToken"] = "cli-new-access"
+        self.path.write_text(json.dumps(document))
+        self.assertEqual(client.read_rate_limits().used_percent, 42)
+        self.assertEqual(opener.call_count, 2)
+
     def test_rejected_login_is_not_resent_until_credentials_change(self):
         def request(req, **_kwargs):
             if req.get_method() == "POST":

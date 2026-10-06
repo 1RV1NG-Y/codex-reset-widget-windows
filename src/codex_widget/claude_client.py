@@ -125,12 +125,15 @@ class ClaudeClient:
         self._cache_token: str | None = None
         self._next_fetch = 0.0
         self._retry_at = 0.0
+        # Rate limits apply to the token that provoked them; a new login is tried.
+        self._retry_token: str | None = None
         # A login the server definitively rejected; retried only once it changes.
         self._rejected: tuple[str, str] | None = None
 
-    def _rate_limited(self, exc: HTTPError, what: str) -> ClaudeClientError:
+    def _rate_limited(self, exc: HTTPError, what: str, token: str) -> ClaudeClientError:
         delay = _retry_after_seconds(exc)
         self._retry_at = time.monotonic() + delay
+        self._retry_token = token
         return ClaudeClientError(f"{what} rate limited; retrying in {_wait_text(delay)}")
 
     def _reject(self, token: str, message: str) -> ClaudeClientError:
@@ -206,7 +209,7 @@ class ClaudeClient:
                         old_token, "Claude session expired; run claude auth login"
                     ) from None
                 if exc.code == 429:
-                    raise self._rate_limited(exc, "Claude login renewal") from None
+                    raise self._rate_limited(exc, "Claude login renewal", old_token) from None
                 raise ClaudeClientError(
                     f"Claude login renewal failed (HTTP {exc.code}); retrying automatically"
                 ) from None
@@ -245,11 +248,6 @@ class ClaudeClient:
 
     def read_rate_limits(self, *, force: bool = False) -> UsageSnapshot:
         try:
-            remaining = self._retry_at - time.monotonic()
-            if remaining > 0:
-                raise ClaudeClientError(
-                    f"Claude usage rate limited; retrying in {_wait_text(remaining)}"
-                )
             env_token = os.environ.get("CLAUDE_CODE_OAUTH_TOKEN")
             if env_token:
                 token = env_token
@@ -258,6 +256,11 @@ class ClaudeClient:
                 token = oauth["accessToken"]
                 # Ask usage first: the server decides whether this token is still
                 # usable. A stale local expiry must not interrupt working usage.
+            remaining = self._retry_at - time.monotonic()
+            if remaining > 0 and token == self._retry_token:
+                raise ClaudeClientError(
+                    f"Claude usage rate limited; retrying in {_wait_text(remaining)}"
+                )
             if self._rejected is not None and self._rejected[0] == token:
                 # Resending a rejected login only provokes server rate limits.
                 raise ClaudeClientError(self._rejected[1])
@@ -286,7 +289,7 @@ class ClaudeClient:
                     if exc.code == 403:
                         raise ClaudeClientError("Claude usage access denied (HTTP 403); retrying automatically") from None
                     if exc.code == 429:
-                        raise self._rate_limited(exc, "Claude usage") from None
+                        raise self._rate_limited(exc, "Claude usage", token) from None
                     raise ClaudeClientError(f"Claude usage request failed (HTTP {exc.code})") from None
             snapshot = self._parse_snapshot(document)
             self._rejected = None
